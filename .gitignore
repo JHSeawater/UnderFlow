@@ -53,3 +53,29 @@ dkms.conf
 
 # debug information files
 *.dwo
+
+# =======================================================
+# ELEC462: Black Market Broker Project Specific Rules
+# =======================================================
+
+# 1. Custom Executables (확장자 없는 커스텀 실행 파일)
+server
+client
+monitor
+
+# 2. Game Data & Logs / Sandbox (동적 생성 데이터베이스 및 로그)
+# 샌드박스의 껍데기 디렉토리는 유지하되, 내부의 지속 변경되는 파일은 푸시/커밋 방지
+/data/users/*
+/data/master/*
+!/data/users/.gitkeep
+!/data/master/.gitkeep
+*.dat
+*.log
+*.txt
+
+# 3. Editor & OS Junk (에디터 및 OS 임시 파일)
+*.swp
+*.swo
+.DS_Store
+.vscode/
+.idea/
