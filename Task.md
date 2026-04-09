@@ -2,7 +2,7 @@
 
 ## 🤝 전원 공통 및 프로젝트 설정 (Common & Env Setup)
 - [ ] **통합 빌드 환경(Makefile) 구축 및 문서화 (도큐먼트 점수 20점 방어)**
-  - [ ] 컴파일 시 필수 링킹 옵션(`-pthread`, `-lncurses`)이 포함된 전용 `Makefile` 구축
+  - [ ] 컴파일 시 필수 링킹 옵션(`-pthread`, 한글 및 UI 깨짐 방지를 위한 `-lncursesw`)이 포함된 전용 `Makefile` 구축
   - [ ] 프로젝트 빌드 방법, 실행 옵션, 주요 기능이 완벽히 정리된 `README.md` 작성
 - [ ] **패킷 프로토콜 엔디안(Endianness) 변환 규약 정립**
   - [ ] `protocol.h` 헤더 작성 시 다중 클라이언트의 아키텍처(CPU) 호환성을 위해 `int` 등 4바이트 이상 데이터에 대해 송신 전 `htonl()`, 수신 후 `ntohl()` 강제 적용 보장
@@ -50,6 +50,7 @@
     - [ ] `스레드 B (수신)` : `recv()` 로 서버 패킷 무한 대기 후 수신 시 UI 상단 갱신
   - [ ] `cbreak()`, `noecho()`, `timeout(0)` 환경에서의 비동기 커스텀 `char buffer[]` 제한 입력 구현
 - [ ] **Ncurses 6분할 윈도우 인터페이스 (UI Engine)**
+  - [ ] Ncurses 환경에서 한글 깨짐을 방지하기 위해 `initscr()` 호출 직전 반드시 `<locale.h>`의 `setlocale(LC_ALL, "");` 호출
   - [ ] `initscr()` 등 호출 직후 `getmaxyx()` 연산으로 최소 해상도(100x30) 미달 시 프로그램 강제 종료 및 에러 문구 렌더링 (Fail-Safe 적용)
   - [ ] 배율(Float) 할당의 정수 버림 오차 방지를 위해 최종단 윈도우는 잔여 길이(`COLS` 혹은 `LINES`에서 누적폭을 뺀 값)로 연산 할당
   - [ ] `wgetch()` 대기 루프 내부에서 창 크기 조절 시스템 인터럽트를 잡아내는 `KEY_RESIZE` 분기문으로 `delwin()` 및 동적 `Redraw` 
