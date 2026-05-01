@@ -1,7 +1,7 @@
-# Game Design Document (GDD): Black Market Broker
+# 시스템 프로그래밍 팀프로젝트 - UNDERFLOW
 
 ## 1. 게임 개요 (Game Overview)
-- **게임명**: Black Market Broker (가제)
+- **게임명**: UNDERFLOW
 - **장르**: 터미널 기반 멀티플레이어 경제/소셜 시뮬레이션
 - **타겟 환경**: Ubuntu 24.04, CLI (터미널)
 - **개발 언어**: 순수 C 언어 (POSIX 시스템 콜 전면 활용)
