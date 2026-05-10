@@ -27,9 +27,27 @@
 
 ## 5. 강의 AI 사용 정책 및 절대 금지 사항 (Strict Prohibitions)
 - **다른 언어 사용 금지**: C 언어 외 타 언어/쉘 스크립트 불가.
-- **표절 금지 (No Plagiarism)**: 무단 복제 불가.
 
 ## 6. 개발 일정
-- 최종 발표 (Final Presentation): 2026년 6월 2일 또는 9일 (수업 시간 중 진행)
+- 최종 발표 (Final Presentation): 2026년 6월 2일 (수업 시간 중 진행)
 - 코드 제출 마감 (Code Submission): 2026년 6월 24일 11:59 PM
 - 기말고사: 2026년 16일 (수업 시간 중 진행)
+
+# 프로젝트 개발 AI 규칙
+사용자는 개발 문서(Task.md, Worktable.md, Schedule.md)에 있는 A(네트워크) 역할을 담당하여 수행
+
+## 1. 개발 문서
+- 모든 개발 문서는 한글로 작성
+- GDD.md 기획 문서를 기반으로 개발
+- Task.md, Worktable.md, Schedule.md를 참고하여 개발 진행
+### Task.md
+- 구현을 완료한 태스크는 Task.md에 체크
+- 구현해야 할 태스크는 Task.md에서 확인
+### Worktable.md
+- 해당 문서에서 구현해야 할 기능들과 분배된 역할들 확인
+### Schedule.md
+- 해당 문서에서 역할 별 스케줄 확인
+
+## 2. 프로젝트 관리
+- 깃허브 링크: https://github.com/JHSeawater/Project_DW.git
+- A(네트워크) 브랜치: feat/network
