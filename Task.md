@@ -2,21 +2,21 @@
 
 ## 🤝 전원 공통 및 프로젝트 설정 (Common & Env Setup)
 - [ ] **통합 빌드 환경(Makefile) 구축 및 문서화 (도큐먼트 점수 20점 방어)**
-  - [ ] 컴파일 시 필수 링킹 옵션(`-pthread`, 한글 및 UI 깨짐 방지를 위한 `-lncursesw`)이 포함된 전용 `Makefile` 구축
+  - [x] 컴파일 시 필수 링킹 옵션(`-pthread`, 한글 및 UI 깨짐 방지를 위한 `-lncursesw`)이 포함된 전용 `Makefile` 구축
   - [ ] 프로젝트 빌드 방법, 실행 옵션, 주요 기능이 완벽히 정리된 `README.md` 작성
 - [ ] **패킷 프로토콜 엔디안(Endianness) 변환 규약 정립**
-  - [ ] `protocol.h` 헤더 작성 시 다중 클라이언트의 아키텍처(CPU) 호환성을 위해 `int` 등 4바이트 이상 데이터에 대해 송신 전 `htonl()`, 수신 후 `ntohl()` 강제 적용 보장
+  - [x] `protocol.h` 헤더 작성 시 다중 클라이언트의 아키텍처(CPU) 호환성을 위해 `int` 등 4바이트 이상 데이터에 대해 송신 전 `htonl()`, 수신 후 `ntohl()` 강제 적용 보장
 - [ ] **메모리 누수(Memory Leak) 점검 아키텍처**
   - [ ] 프로젝트 마무리(6주차) 단계 시, 3인 모두 `Valgrind`를 구동하여 소켓이나 연결 리스트 상에서 `malloc` 후 `free()`되지 않은 메모리 찌꺼기가 없는지 교차 검증
 
 ## 📡 User 1: 서버 네트워크 및 이벤트 스레드 담당 (Network & Background)
 - [ ] **소켓 통신 뼈대 및 구조체 설계**
-  - [ ] `socket()`, `bind()`, `listen()`, `accept()` 기반 포트 개방
-  - [ ] Thread-per-client 모델 `pthread_create()` 연동
-  - [ ] 로그인, 채팅, 찌라시, 매매 요청 등 패킷(`Packet`) 프로토콜 구조 구조화
+  - [x] `socket()`, `bind()`, `listen()`, `accept()` 기반 포트 개방
+  - [x] Thread-per-client 모델 `pthread_create()` 연동
+  - [x] 로그인, 채팅, 찌라시, 매매 요청 등 패킷(`Packet`) 프로토콜 구조 구조화
   - [ ] **[이중 접속 차단]** 신규 접속 요청 시 전역 `active_keys` 배열을 순회하여 이미 접속 중인 Key면 메모리 상에서 연결 즉시 거부
-  - [ ] **[망실 방어]** 클라이언트 강제 종료 시 `recv() <= 0` 예외를 Catch하여 해당 Socket 안전하게 `close()`
-  - [ ] 퇴장 유저를 '현재 접속자 배열'에서 삭제할 때 데이터 충돌을 막기 위한 전역 상태 `Mutex Lock` 적용
+  - [x] **[망실 방어]** 클라이언트 강제 종료 시 `recv() <= 0` 예외를 Catch하여 해당 Socket 안전하게 `close()`
+  - [x] 퇴장 유저를 '현재 접속자 배열'에서 삭제할 때 데이터 충돌을 막기 위한 전역 상태 `Mutex Lock` 적용
 - [ ] **좀비 프로세스 방어 파이프라인 (Watchdog)**
   - [ ] 부모 `monitor` 프로세스에서 `fork()` 호출 후 `exec()` (ex: `execv`) 시스템 콜을 통해 자식 서버 교체 실행
   - [ ] 자식 프로세스(서버) 붕괴 시 `waitpid()` 로 백그라운드 추적 및 재가동 리스크 차단

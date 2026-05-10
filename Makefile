@@ -8,7 +8,7 @@ LDFLAGS_CLIENT = -pthread -lncurses # 한글 깨짐 시 -lncursesw 로 변경
 
 # 소스 파일 자동 탐색
 SRCS_COMMON = $(wildcard src/common/*.c)
-SRCS_SERVER = $(wildcard src/server/*.c)
+SRCS_SERVER = $(wildcard src/server/*.c src/server/userdb/*.c)
 SRCS_CLIENT = $(wildcard src/client/*.c)
 
 # 오브젝트 파일 변환
