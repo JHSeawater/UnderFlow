@@ -2,6 +2,10 @@
 #include <locale.h>
 #include <string.h>
 #include <stdlib.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+#include <sys/select.h>
+#include "protocol.h"
 
 #define MIN_WIDTH 100
 #define MIN_HEIGHT 30
@@ -12,6 +16,7 @@ typedef struct{
     WINDOW *market;
     WINDOW *bounty;
     WINDOW *inventory;
+    WINDOW *log_border;
     WINDOW *log;
     WINDOW *prompt;
 }UI;
@@ -23,6 +28,7 @@ void delete_windows(UI *ui)
     if(ui->bounty)delwin(ui->bounty);
     if(ui->inventory)delwin(ui->inventory);
     if(ui->log)delwin(ui->log);
+    if(ui->log_border)delwin(ui->log_border);
     if(ui->prompt)delwin(ui->prompt);
 
     memset(ui,0,sizeof(UI));
@@ -67,7 +73,7 @@ void draw_ui(UI*ui)
     int bounty_w=w-market_w;
 
     int y=0;
-    ui->news=newwin(new_h,w,y,0);
+    ui->news=newwin(news_h,w,y,0);
     y+=news_h;
 
     ui->market=newwin(middle_h, market_w, y, 0);
@@ -77,7 +83,8 @@ void draw_ui(UI*ui)
     ui->inventory=newwin(inventory_h, w, y, 0);
     y+=inventory_h;
 
-    ui->log=newwin(log_h, w, y, 0);
+    ui->log_border=newwin(log_h, w, y, 0);
+    ui->log=derwin(ui->log_border, log_h - 2, w - 2, 1, 1);
     y+=log_h;
 
     ui->prompt=newwin(prompt_h, w, h-1, 0);
@@ -87,7 +94,7 @@ void draw_ui(UI*ui)
     scrollok(ui->log, TRUE);
     draw_title(ui->news, "다크웹 중앙 뉴스망 / 브로드캐스트 브리핑");
     mvwprintw(ui->news, 1, 2, "> [속보] A정치인 비자금 스캔들 관련 기밀 가치 상승 전망");
-    mvprintw(ui->news, 2, 2, "> [SYSTEM] 시장 내 악성 재고 만료 처리가 곧 진행됩니다.");
+    mvwprintw(ui->news, 2, 2, "> [SYSTEM] 시장 내 악성 재고 만료 처리가 곧 진행됩니다.");
 
     draw_title(ui->market, "글로벌 마켓 (Market)");
     mvwprintw(ui->market, 1, 2, "ID  | 태그 조합 및 기밀 정보        | 가치");
@@ -112,10 +119,10 @@ void draw_ui(UI*ui)
     mvwprintw(ui->inventory, 2, 2, "[02] ID:154 | [A정치인][비자금] | 동결 재고");
     mvwprintw(ui->inventory, 3, 2, "[03] 빈 슬롯 | [04] 빈 슬롯 | [05] 빈 슬롯");
 
-    draw_title(ui->log, "시스템 알림 및 채팅 로그");
-    mvwprintw(ui->log, 1, 2, "[SYSTEM] UNDERFLOW UI started.");
-    mvwprintw(ui->log, 2, 2, "[SYSTEM] Resize-safe ncurses layout enabled.");
-    mvwprintw(ui->log, 3, 2, "[TIP] 터미널 창 크기를 조절해보세요.");
+    draw_title(ui->log_border, "시스템 알림 및 채팅 로그");
+    wprintw(ui->log, "[SYSTEM] UNDERFLOW UI started.\n");
+    wprintw(ui->log, "[SYSTEM] Resize-safe ncurses layout enabled.\n");
+    wprintw(ui->log, "[TIP] 터미널 창 크기를 조절해보세요.");
 
     mvwprintw(ui->prompt, 0, 0, "> ");
     if (w >= 45) {
@@ -126,6 +133,7 @@ void draw_ui(UI*ui)
     wrefresh(ui->market);
     wrefresh(ui->bounty);
     wrefresh(ui->inventory);
+    wrefresh(ui->log_border);
     wrefresh(ui->log);
     wrefresh(ui->prompt);
 }
@@ -142,7 +150,37 @@ void redraw(UI *ui) {
     draw_ui(ui);
 }
 
-int main(void) {
+int main(int argc, char *argv[]) {
+    if (argc < 2) {
+        printf("Usage: %s <user_key>\n", argv[0]);
+        return 1;
+    }
+    const char *user_key = argv[1];
+
+    int sock = socket(PF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in serv_addr;
+    memset(&serv_addr, 0, sizeof(serv_addr));
+    serv_addr.sin_family = AF_INET;
+    serv_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+    serv_addr.sin_port = htons(8080);
+
+    if (connect(sock, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) == -1) {
+        perror("connect error");
+        return 1;
+    }
+
+    Packet pkt;
+    memset(&pkt, 0, sizeof(Packet));
+    pkt.type = PKT_REQ_LOGIN;
+    strncpy(pkt.body.login.key, user_key, MAX_KEY_LEN - 1);
+    packet_send(sock, &pkt);
+
+    if (packet_recv(sock, &pkt) <= 0 || pkt.type != PKT_RES_LOGIN_OK) {
+        printf("Login Failed.\n");
+        close(sock);
+        return 1;
+    }
+
     setlocale(LC_ALL, "");
 
     initscr();
@@ -168,6 +206,18 @@ int main(void) {
         int ch = wgetch(ui.prompt);
 
         if (ch == ERR) {
+            struct timeval tv = {0, 0};
+            fd_set readfds;
+            FD_ZERO(&readfds);
+            FD_SET(sock, &readfds);
+            if (select(sock + 1, &readfds, NULL, NULL, &tv) > 0) {
+                if (packet_recv(sock, &pkt) > 0) {
+                    if (pkt.type == PKT_EVT_CHAT) {
+                        wprintw(ui.log, "\n[Broadcast from %s] %s", pkt.body.chat_evt.sender_key, pkt.body.chat_evt.text);
+                        wrefresh(ui.log);
+                    }
+                }
+            }
             continue;
         }
 
@@ -188,6 +238,11 @@ int main(void) {
 
             wprintw(ui.log, "\n[YOU] %s", input);
             wrefresh(ui.log);
+
+            memset(&pkt, 0, sizeof(Packet));
+            pkt.type = PKT_REQ_CHAT;
+            strncpy(pkt.body.chat.text, input, MAX_TEXT_LEN - 1);
+            packet_send(sock, &pkt);
 
             len = 0;
             memset(input, 0, sizeof(input));

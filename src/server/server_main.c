@@ -7,13 +7,13 @@
 #include <pthread.h>
 #include <arpa/inet.h>
 #include "protocol.h"
-#include "src/common/network.h"
-#include "src/server/userdb/userdb.h"
+#include "userdb/userdb.h"
 
 #define PORT 8080
 #define MAX_CLIENTS 10
 
 int client_sockets[MAX_CLIENTS];
+char active_keys[MAX_CLIENTS][MAX_KEY_LEN];
 pthread_mutex_t clients_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 // 패킷 방송
@@ -21,7 +21,7 @@ void broadcast_packet(Packet *pkt) {
     pthread_mutex_lock(&clients_mutex);
     for (int i = 0; i < MAX_CLIENTS; i++) {
         if (client_sockets[i] != 0) {
-            send_packet(client_sockets[i], pkt);
+            packet_send(client_sockets[i], pkt);
         }
     }
     pthread_mutex_unlock(&clients_mutex);
@@ -33,29 +33,110 @@ void* client_handler(void* arg) {
     free(arg);
     
     Packet pkt;
+    char my_key[MAX_KEY_LEN] = {0};
+    int logged_in = 0;
+
+    // 1. 로그인 단계 대기
+    while (!logged_in) {
+        if (packet_recv(sock, &pkt) <= 0) {
+            goto disconnect;
+        }
+
+        if (pkt.type == PKT_REQ_LOGIN) {
+            // 이중 접속 검사
+            pthread_mutex_lock(&clients_mutex);
+            int duplicate = 0;
+            for (int i = 0; i < MAX_CLIENTS; i++) {
+                if (client_sockets[i] != 0 && client_sockets[i] != sock && 
+                    strncmp(active_keys[i], pkt.body.login.key, MAX_KEY_LEN) == 0) {
+                    duplicate = 1;
+                    break;
+                }
+            }
+            pthread_mutex_unlock(&clients_mutex);
+
+            if (duplicate) {
+                Packet res;
+                memset(&res, 0, sizeof(Packet));
+                res.type = PKT_RES_LOGIN_FAIL;
+                res.body.error.error_code = ERR_DUPLICATE_LOGIN;
+                strncpy(res.body.error.reason, "이미 접속 중인 계정입니다.", MAX_TEXT_LEN - 1);
+                packet_send(sock, &res);
+                goto disconnect;
+            }
+
+            // DB 조회 및 생성
+            UserRecord rec;
+            off_t offset;
+            if (userdb_find(pkt.body.login.key, &rec, &offset) != 0) {
+                memset(&rec, 0, sizeof(UserRecord));
+                strncpy(rec.key, pkt.body.login.key, MAX_KEY_LEN - 1);
+                rec.money = 1000;
+                userdb_append(&rec, &offset);
+            }
+
+            if (userdb_is_burned(&rec)) {
+                Packet res;
+                memset(&res, 0, sizeof(Packet));
+                res.type = PKT_RES_LOGIN_FAIL;
+                res.body.error.error_code = ERR_KEY_BURNED;
+                strncpy(res.body.error.reason, "파산/소각된 계정입니다.", MAX_TEXT_LEN - 1);
+                packet_send(sock, &res);
+                goto disconnect;
+            }
+
+            // 접속 성공 처리
+            pthread_mutex_lock(&clients_mutex);
+            for (int i = 0; i < MAX_CLIENTS; i++) {
+                if (client_sockets[i] == sock) {
+                    strncpy(active_keys[i], pkt.body.login.key, MAX_KEY_LEN - 1);
+                    break;
+                }
+            }
+            pthread_mutex_unlock(&clients_mutex);
+
+            strncpy(my_key, pkt.body.login.key, MAX_KEY_LEN - 1);
+            logged_in = 1;
+
+            Packet res;
+            memset(&res, 0, sizeof(Packet));
+            res.type = PKT_RES_LOGIN_OK;
+            res.body.login_ok.assigned_session_id = sock;
+            res.body.login_ok.money = rec.money;
+            res.body.login_ok.goal_money = 10000;
+            packet_send(sock, &res);
+            
+            printf("[Server] User '%s' logged in.\n", my_key);
+        }
+    }
+
+    // 2. 메인 채팅 루프
     while (1) {
-        if (recv_packet(sock, &pkt) < 0) {
-            printf("[Server] Client socket %d disconnected.\n", sock);
+        if (packet_recv(sock, &pkt) <= 0) {
             break;
         }
         
         if (pkt.type == PKT_REQ_CHAT) {
-            printf("[Server] Chat received from user: %s\n", pkt.text);
+            printf("[Server] Chat received from %s: %s\n", my_key, pkt.body.chat.text);
             Packet broadcast_pkt;
             memset(&broadcast_pkt, 0, sizeof(Packet));
             broadcast_pkt.type = PKT_EVT_CHAT;
-            strncpy(broadcast_pkt.text, pkt.text, MAX_TEXT_LEN - 1);
+            strncpy(broadcast_pkt.body.chat_evt.text, pkt.body.chat.text, MAX_TEXT_LEN - 1);
+            strncpy(broadcast_pkt.body.chat_evt.sender_key, my_key, MAX_KEY_LEN - 1);
             
-            // 모든 클라이언트에 메세지 전송
             broadcast_packet(&broadcast_pkt);
         }
     }
+
+disconnect:
+    printf("[Server] Client socket %d disconnected.\n", sock);
     
-    // 멀티스레딩 경쟁 방어
+    // 멀티스레딩 경쟁 방어 및 퇴장 처리
     pthread_mutex_lock(&clients_mutex);
     for (int i = 0; i < MAX_CLIENTS; i++) {
         if (client_sockets[i] == sock) {
             client_sockets[i] = 0;
+            memset(active_keys[i], 0, MAX_KEY_LEN);
             break;
         }
     }
@@ -70,6 +151,7 @@ int main(void) {
     socklen_t client_addr_size;
     
     memset(client_sockets, 0, sizeof(client_sockets));
+    memset(active_keys, 0, sizeof(active_keys));
     
     // 유저 데이터베이스 초기화
     if (userdb_init() < 0) {
