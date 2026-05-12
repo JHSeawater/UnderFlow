@@ -7,7 +7,6 @@
 #include <pthread.h>
 #include <arpa/inet.h>
 #include "protocol.h"
-#include "src/common/network.h"
 
 #define PORT 8080
 
@@ -18,14 +17,14 @@ void* recv_thread(void* arg) {
     
     while (1) {
         // 패킷 수신
-        if (recv_packet(sock, &pkt) < 0) {
+        if (packet_recv(sock, &pkt) < 0) {
             printf("\n[Client] Server disconnected.\n");
             exit(0);
         }
 
         // 패킷 타입 처리
         if (pkt.type == PKT_EVT_CHAT) {
-            printf("\r\033[K[Broadcast]: %s\n", pkt.text);
+            printf("\r\033[K[Broadcast from %s]: %s\n", pkt.body.chat_evt.sender_key, pkt.body.chat_evt.text);
             printf("Input > ");
             fflush(stdout);
         }
@@ -59,6 +58,19 @@ int main(int argc, char *argv[]) {
     
     printf("[Client] Connected to server successfully.\n");
     
+    Packet pkt;
+    memset(&pkt, 0, sizeof(Packet));
+    pkt.type = PKT_REQ_LOGIN;
+    strncpy(pkt.body.login.key, (argc > 2) ? argv[2] : "headless_user", MAX_KEY_LEN - 1);
+    packet_send(sock, &pkt);
+
+    if (packet_recv(sock, &pkt) <= 0 || pkt.type != PKT_RES_LOGIN_OK) {
+        printf("Login Failed.\n");
+        close(sock);
+        return 1;
+    }
+    printf("[Client] Logged in successfully!\n");
+    
     // 수신 스레드 생성
     pthread_t r_thread;
     pthread_create(&r_thread, NULL, recv_thread, (void*)&sock);
@@ -79,9 +91,9 @@ int main(int argc, char *argv[]) {
         Packet pkt;
         memset(&pkt, 0, sizeof(Packet));
         pkt.type = PKT_REQ_CHAT;
-        strncpy(pkt.text, buf, MAX_TEXT_LEN - 1);
+        strncpy(pkt.body.chat.text, buf, MAX_TEXT_LEN - 1);
         
-        if (send_packet(sock, &pkt) < 0) {
+        if (packet_send(sock, &pkt) < 0) {
             printf("[Client] Failed to send packet.\n");
             break;
         }
