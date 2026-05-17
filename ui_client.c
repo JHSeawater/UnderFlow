@@ -152,16 +152,17 @@ void redraw(UI *ui) {
 
 int main(int argc, char *argv[]) {
     if (argc < 2) {
-        printf("Usage: %s <user_key>\n", argv[0]);
+        printf("Usage: %s <user_key> [server_ip]\n", argv[0]);
         return 1;
     }
     const char *user_key = argv[1];
+    const char *ip = (argc > 2) ? argv[2] : "127.0.0.1";
 
     int sock = socket(PF_INET, SOCK_STREAM, 0);
     struct sockaddr_in serv_addr;
     memset(&serv_addr, 0, sizeof(serv_addr));
     serv_addr.sin_family = AF_INET;
-    serv_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+    serv_addr.sin_addr.s_addr = inet_addr(ip);
     serv_addr.sin_port = htons(8080);
 
     if (connect(sock, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) == -1) {
@@ -261,7 +262,8 @@ int main(int argc, char *argv[]) {
             int h, w;
             getmaxyx(stdscr, h, w);
 
-            if (len < INPUT_MAX - 1 && len < w - 45) {
+            int max_input_len = (w > 45) ? (w - 45) : 0;
+            if (len < INPUT_MAX - 1 && len < max_input_len) {
                 input[len] = ch;
                 len++;
                 input[len] = '\0';

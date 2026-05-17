@@ -17,7 +17,7 @@ void* recv_thread(void* arg) {
     
     while (1) {
         // 패킷 수신
-        if (packet_recv(sock, &pkt) < 0) {
+        if (packet_recv(sock, &pkt) <= 0) {
             printf("\n[Client] Server disconnected.\n");
             exit(0);
         }

@@ -15,12 +15,13 @@
 int client_sockets[MAX_CLIENTS];
 char active_keys[MAX_CLIENTS][MAX_KEY_LEN];
 pthread_mutex_t clients_mutex = PTHREAD_MUTEX_INITIALIZER;
+static int32_t g_session_counter = 0;
 
 // 패킷 방송
 void broadcast_packet(Packet *pkt) {
     pthread_mutex_lock(&clients_mutex);
     for (int i = 0; i < MAX_CLIENTS; i++) {
-        if (client_sockets[i] != 0) {
+        if (client_sockets[i] != 0 && active_keys[i][0] != '\0') {
             packet_send(client_sockets[i], pkt);
         }
     }
@@ -65,14 +66,11 @@ void* client_handler(void* arg) {
                 goto disconnect;
             }
 
-            // DB 조회 및 생성
+            // DB 조회 및 생성 (find+create 원자적 수행으로 TOCTOU 방지)
             UserRecord rec;
             off_t offset;
-            if (userdb_find(pkt.body.login.key, &rec, &offset) != 0) {
-                memset(&rec, 0, sizeof(UserRecord));
-                strncpy(rec.key, pkt.body.login.key, MAX_KEY_LEN - 1);
-                rec.money = 1000;
-                userdb_append(&rec, &offset);
+            if (userdb_find_or_create(pkt.body.login.key, 1000, &rec, &offset) < 0) {
+                goto disconnect;
             }
 
             if (userdb_is_burned(&rec)) {
@@ -101,7 +99,7 @@ void* client_handler(void* arg) {
             Packet res;
             memset(&res, 0, sizeof(Packet));
             res.type = PKT_RES_LOGIN_OK;
-            res.body.login_ok.assigned_session_id = sock;
+            res.body.login_ok.assigned_session_id = ++g_session_counter;
             res.body.login_ok.money = rec.money;
             res.body.login_ok.goal_money = 10000;
             packet_send(sock, &res);

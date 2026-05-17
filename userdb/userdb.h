@@ -46,4 +46,9 @@ int userdb_burn_at(off_t offset);
 // 소각 마커가 -1에서 다른 값으로 바뀌면 이 함수 안만 고치면 됨.
 int userdb_is_burned(const UserRecord *rec);
 
+// key로 찾되 없으면 initial_money로 신규 레코드 생성. find→append가 단일 락 안에서 원자적으로 수행됨.
+// 반환값: 0=기존 유저, 1=신규 생성, -1=에러
+int userdb_find_or_create(const char *key, int initial_money,
+                          UserRecord *out, off_t *out_offset);
+
 #endif

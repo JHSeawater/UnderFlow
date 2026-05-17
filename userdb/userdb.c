@@ -167,5 +167,54 @@ int userdb_is_burned(const UserRecord *rec){
     return rec->money == -1 ? 1 : 0;
 }
 
+int userdb_find_or_create(const char *key, int initial_money,
+                          UserRecord *out, off_t *out_offset) {
+    pthread_mutex_lock(&g_userdb_mutex);
+
+    int fd = open(USERDB_PATH, O_RDWR);
+    if (fd == -1) {
+        pthread_mutex_unlock(&g_userdb_mutex);
+        return -1;
+    }
+
+    UserRecord rec;
+    off_t offset = 0;
+    ssize_t n;
+    int found = 0;
+    while ((n = read(fd, &rec, sizeof(UserRecord))) == sizeof(UserRecord)) {
+        if (strncmp(key, rec.key, MAX_KEY_LEN) == 0) {
+            found = 1;
+            break;
+        }
+        offset += n;
+    }
+
+    if (found) {
+        if (out)        *out        = rec;
+        if (out_offset) *out_offset = offset;
+        close(fd);
+        pthread_mutex_unlock(&g_userdb_mutex);
+        return 0;
+    }
+
+    // 못 찾음 → 락을 보유한 채로 append (TOCTOU 방지)
+    memset(&rec, 0, sizeof(UserRecord));
+    strncpy(rec.key, key, MAX_KEY_LEN - 1);
+    rec.money = initial_money;
+
+    off_t end_pos = lseek(fd, 0, SEEK_END);
+    if (end_pos == -1 || write(fd, &rec, sizeof(UserRecord)) != sizeof(UserRecord)) {
+        close(fd);
+        pthread_mutex_unlock(&g_userdb_mutex);
+        return -1;
+    }
+
+    if (out)        *out        = rec;
+    if (out_offset) *out_offset = end_pos;
+    close(fd);
+    pthread_mutex_unlock(&g_userdb_mutex);
+    return 1;
+}
+
 
 
