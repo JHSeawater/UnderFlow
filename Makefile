@@ -9,7 +9,7 @@ LDFLAGS_CLIENT = -pthread -lncursesw
 
 # 소스 파일 자동 탐색
 SRCS_COMMON = $(wildcard src/common/*.c) protocol.c
-SRCS_SERVER = $(wildcard src/server/*.c userdb/*.c)
+SRCS_SERVER = $(wildcard src/server/*.c userdb/*.c handlers/*.c market/*.c npc/*.c sandbox/*.c)
 SRCS_CLIENT = $(wildcard src/client/*.c)
 
 # 오브젝트 파일 변환
