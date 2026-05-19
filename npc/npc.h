@@ -15,7 +15,7 @@
 
 typedef struct {
     int32_t  npc_id;
-    uint32_t required_tags;   // 비트마스크 (정확히 일치해야 매각 가능)
+    uint32_t required_tags;   // 비트마스크 (제출 문서 태그 합집합이 이 태그를 포함해야 매각 가능)
     int32_t  bounty;
 } NpcOrder;
 
@@ -33,5 +33,10 @@ int  npc_take(int32_t npc_id, NpcOrder *out);
 
 // 정보만 조회 (제거 안 함).
 int  npc_lookup(int32_t npc_id, NpcOrder *out);
+
+// 현재 NPC 보드 전체를 orders 배열에 복사. 늦은 접속자 동기화용.
+// g_npc_mutex 잡고 복사 후 즉시 release — 락 외부에서 packet_send 해야 함.
+// 반환: 0=성공, -1=인자 오류
+int  npc_snapshot(NpcOrder *orders, int max_orders, int *out_count);
 
 #endif

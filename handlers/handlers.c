@@ -119,8 +119,8 @@ static void handle_buy(int sock, Packet *pkt, const char *my_key, off_t my_offse
     evt.body.market_remove.doc_id = doc.doc_id;
     broadcast_packet(&evt);
 
-    // 7) 자본금 0 도달 시 파산 처리 (자본금 다 까먹은 경우)
-    if (rec.money == 0) {
+    // 7) 파산 처리: 자금 AND 인벤토리 모두 0이면 깡통 — 계정 소각
+    if (rec.money == 0 && rec.inventory_count == 0) {
         userdb_burn_at(my_offset);
     }
 }
@@ -193,11 +193,12 @@ static void handle_sell(int sock, Packet *pkt, const char *my_key, off_t my_offs
         combined_tags |= meta.tags;
     }
 
-    // 4) ★ 태그 조합 검증: 합집합 == NPC 요구 태그 (한 비트도 어긋나면 거절)
-    if (combined_tags != npc.required_tags) {
+    // 4) ★ 태그 조합 검증: 합집합이 NPC 요구 태그를 포함(부분집합)해야 성립
+    //    extra 태그 문서도 소모되지만 거래는 성립 (GDD 2.A 수퍼셋 규칙)
+    if ((combined_tags & npc.required_tags) != npc.required_tags) {
         npc_spawn(&npc);
         market_doc_unlock_many(doc_ids, count);
-        send_error(sock, ERR_TAG_MISMATCH, "태그 조합이 요구사항과 일치하지 않습니다.");
+        send_error(sock, ERR_TAG_MISMATCH, "태그 조합이 요구사항을 충족하지 못합니다.");
         return;
     }
 
@@ -284,6 +285,11 @@ static void handle_dispose(int sock, Packet *pkt, const char *my_key, off_t my_o
     memset(&res, 0, sizeof(Packet));
     res.type = PKT_RES_DISPOSE_OK;
     packet_send(sock, &res);
+
+    // 파산 처리: 파쇄 후 자금 AND 인벤토리 모두 0이면 깡통 — 계정 소각
+    if (rec.money == 0 && rec.inventory_count == 0) {
+        userdb_burn_at(my_offset);
+    }
 }
 
 
@@ -372,8 +378,8 @@ static void handle_rumor(int sock, Packet *pkt, const char *my_key, off_t my_off
     g_rumor_busy = 0;
     pthread_mutex_unlock(&g_rumor_mutex);
 
-    // 파산 트리거 (수수료로 잔액 0 되면 소각)
-    if (rec.money == 0) {
+    // 파산 처리: 자금 AND 인벤토리 모두 0이면 깡통 — 계정 소각
+    if (rec.money == 0 && rec.inventory_count == 0) {
         userdb_burn_at(my_offset);
     }
 }

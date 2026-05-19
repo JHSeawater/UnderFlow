@@ -78,6 +78,7 @@ typedef enum {
     PKT_EVT_POLICE_RAID,
     PKT_EVT_GAME_OVER,
     PKT_EVT_VICTORY,
+    PKT_EVT_SCOREBOARD,
 } PacketType;
 
 // =============================================================
@@ -184,6 +185,12 @@ typedef struct {
         } police_raid;
 
         struct { char message[MAX_TEXT_LEN]; } endgame;
+
+        struct {
+            int32_t rank;           // 이 클라이언트의 순위 (1=우승)
+            int32_t final_money;    // 최종 자산
+            char    winner_key[MAX_KEY_LEN];
+        } scoreboard;
     } body;
 } Packet;
 

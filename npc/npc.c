@@ -89,3 +89,15 @@ int npc_lookup(int32_t npc_id, NpcOrder *out){
     pthread_mutex_unlock(&g_npc_mutex);
     return ret;
 }
+
+int npc_snapshot(NpcOrder *orders, int max_orders, int *out_count){
+    if (!orders || !out_count || max_orders <= 0) return -1;
+    pthread_mutex_lock(&g_npc_mutex);
+    int count = 0;
+    for (int i = 0; i < MAX_NPC_BOARD && count < max_orders; i++) {
+        if (g_board[i].in_use) orders[count++] = g_board[i].order;
+    }
+    *out_count = count;
+    pthread_mutex_unlock(&g_npc_mutex);
+    return 0;
+}

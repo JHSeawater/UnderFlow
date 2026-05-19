@@ -149,6 +149,18 @@ int market_is_full(void){
     return full;
 }
 
+int market_snapshot(DocMeta *items, int max_items, int *out_count){
+    if (!items || !out_count || max_items <= 0) return -1;
+    pthread_mutex_lock(&g_market_mutex);
+    int count = 0;
+    for (int i = 0; i < MAX_MARKET_ITEMS && count < max_items; i++) {
+        if (g_market[i].in_use) items[count++] = g_market[i].doc;
+    }
+    *out_count = count;
+    pthread_mutex_unlock(&g_market_mutex);
+    return 0;
+}
+
 // =================================================================
 // 동결 태그
 // =================================================================

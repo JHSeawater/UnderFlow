@@ -45,6 +45,7 @@ $(TARGET_UI): $(OBJS_COMMON) ui_client.o
 
 # 빌드 결과물 청소 (make clean)
 clean:
-	rm -f $(OBJS_COMMON) $(OBJS_SERVER) $(OBJS_CLIENT) $(TARGET_SERVER) $(TARGET_CLIENT)
+	rm -f $(OBJS_COMMON) $(OBJS_SERVER) $(OBJS_CLIENT) ui_client.o \
+	      $(TARGET_SERVER) $(TARGET_CLIENT) $(TARGET_UI)
 
 .PHONY: all clean

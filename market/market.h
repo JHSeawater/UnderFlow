@@ -36,6 +36,11 @@ int  market_lookup(int32_t doc_id, DocMeta *out);
 // 시장 가득 찼는지 (A가 스폰 전에 체크).
 int  market_is_full(void);
 
+// 현재 시장 매물 전체를 items 배열에 복사. 늦은 접속자 동기화용.
+// g_market_mutex 잡고 복사 후 즉시 release — 락 외부에서 packet_send 해야 함.
+// 반환: 0=성공, -1=인자 오류
+int  market_snapshot(DocMeta *items, int max_items, int *out_count);
+
 // =================================================================
 // 동결 태그 관리 (공중파 유출 / 재상장)
 // =================================================================
