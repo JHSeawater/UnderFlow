@@ -69,6 +69,7 @@ void server_trigger_victory(int winner_sock) {
 #define EVT_MARKET_EVERY    2   // 매물 스폰 주기 (틱 수) → 20초
 #define EVT_NPC_EVERY       5   // NPC 시퀀스 주기 (틱 수) → 50초
 #define EVT_NPC_HINT_DELAY  8   // 힌트 후 NPC 실제 등장까지 지연 (초)
+#define EVT_NPC_MAX_AGE_SEC 180 // 미해결 NPC 만료 수명 (초) → 보드 고착 방지
 
 // doc_id / npc_id 발급 카운터 (이벤트 스레드 단독 사용)
 static int32_t g_doc_id_counter = 0;
@@ -238,6 +239,23 @@ static void event_do_npc_sequence(void) {
            npc.npc_id, npc.required_tags, npc.bounty);
 }
 
+// ── 의뢰 에이징 — 오래 미해결 NPC 만료 (GDD 2.B) ──────────────
+static void event_age_npcs(void) {
+    int32_t expired[MAX_NPC_BOARD];
+    int n = 0;
+    if (npc_despawn_aged(EVT_NPC_MAX_AGE_SEC, expired, MAX_NPC_BOARD, &n) <= 0)
+        return;
+
+    for (int i = 0; i < n; i++) {
+        Packet pkt;
+        memset(&pkt, 0, sizeof(Packet));
+        pkt.type = PKT_EVT_NPC_DESPAWN;
+        pkt.body.npc_despawn.npc_id = expired[i];
+        broadcast_packet(&pkt);
+        printf("[Event] NPC 만료(에이징): ID=%d\n", expired[i]);
+    }
+}
+
 // ── 이벤트 스레드 진입점 ───────────────────────────────────────
 static void* event_thread(void *arg) {
     (void)arg;
@@ -263,6 +281,8 @@ static void* event_thread(void *arg) {
             npc_tick = 0;
             event_do_npc_sequence();
         }
+
+        event_age_npcs();
     }
     return NULL;
 }
@@ -447,20 +467,21 @@ void* client_handler(void* arg) {
         } else {
             // B 영역: /buy /sell /dispose /inventory /rumor 등
             handlers_dispatch(sock, &pkt, my_key, my_offset);
-        }
 
-        // 파산(Permadeath) 즉시 처형 — 핸들러 안에서 userdb_burn_at 호출됐을 가능성 검사
-        UserRecord post;
-        if (userdb_find(my_key, &post, NULL) == 0 && userdb_is_burned(&post)) {
-            Packet over;
-            memset(&over, 0, sizeof(Packet));
-            over.type = PKT_EVT_GAME_OVER;
-            strncpy(over.body.endgame.message,
-                    "파산. 계정이 영구 소각되었습니다.",
-                    MAX_TEXT_LEN - 1);
-            packet_send(sock, &over);
-            printf("[Server] User '%s' bankrupted — forced disconnect.\n", my_key);
-            break;
+            // 파산(Permadeath) 즉시 처형 — 핸들러 안에서 userdb_burn_at 호출됐을 가능성 검사.
+            // chat은 자금/인벤토리를 변경하지 않으므로 핸들러 경로에서만 검사한다.
+            UserRecord post;
+            if (userdb_find(my_key, &post, NULL) == 0 && userdb_is_burned(&post)) {
+                Packet over;
+                memset(&over, 0, sizeof(Packet));
+                over.type = PKT_EVT_GAME_OVER;
+                strncpy(over.body.endgame.message,
+                        "파산. 계정이 영구 소각되었습니다.",
+                        MAX_TEXT_LEN - 1);
+                packet_send(sock, &over);
+                printf("[Server] User '%s' bankrupted — forced disconnect.\n", my_key);
+                break;
+            }
         }
     }
 

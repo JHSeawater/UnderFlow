@@ -1,3 +1,4 @@
+#define _XOPEN_SOURCE_EXTENDED 1
 #include <ncurses.h>
 #include <locale.h>
 #include <string.h>
@@ -15,7 +16,7 @@ typedef struct{
     WINDOW *bounty;
     WINDOW *inventory;
     WINDOW *log;
-    WINDOW **prompt;
+    WINDOW *prompt;
 }UI;
 
 void delete_windows(UI *ui)
@@ -74,6 +75,7 @@ int input_limit_width(void) {
     int help_len = strlen(QUICK_HELP);
 
     getmaxyx(stdscr, h, w);
+    (void)h;
 
     return w - help_len - 5;
 }
@@ -82,6 +84,8 @@ void restore_prompt_cursor(UI *ui, const char *input, int len) {
     int h, w;
     int help_len = strlen(QUICK_HELP);
 
+    getmaxyx(ui->prompt, h, w);
+    (void)h;
     werase(ui->prompt);
     mvwprintw(ui->prompt, 0, 0, "> %s", input);
 

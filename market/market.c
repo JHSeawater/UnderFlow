@@ -108,19 +108,11 @@ int market_buy(int32_t doc_id, DocMeta *out){
         pthread_mutex_unlock(&g_market_mutex);
         return -1;
     }
-    DocMeta snapshot = g_market[idx].doc;
-    pthread_mutex_unlock(&g_market_mutex);
-
-    // 동결 검사 (별도 락이라 잡았다 풀고 재검사)
-    if (market_is_doc_frozen(snapshot.tags)) return -2;
-
-    // 다시 잡고 in_use 토글 + 카운트 감소 (선착순 1명만 성공)
-    pthread_mutex_lock(&g_market_mutex);
-    idx = find_slot_by_doc_id(doc_id);
-    if (idx < 0) {
-        // 다른 스레드가 가로챔
+    // 동결 검사를 g_market_mutex 보유 상태에서 수행 — 검사~인수 사이 race 차단.
+    // 락 순서는 항상 g_market_mutex → g_frozen_mutex (역순 취득 코드 없음).
+    if (market_is_doc_frozen(g_market[idx].doc.tags)) {
         pthread_mutex_unlock(&g_market_mutex);
-        return -1;
+        return -2;
     }
     if (out) *out = g_market[idx].doc;
     g_market[idx].in_use = 0;

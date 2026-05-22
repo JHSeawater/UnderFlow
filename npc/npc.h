@@ -27,6 +27,11 @@ int  npc_spawn(const NpcOrder *npc);
 // NPC 강제 만료 (A의 aging).
 int  npc_despawn(int32_t npc_id);
 
+// 수명(max_age_sec)을 초과한 NPC를 일괄 만료. 만료된 npc_id를 out_ids에 담아 반환.
+// 호출자(이벤트 스레드)가 락 밖에서 PKT_EVT_NPC_DESPAWN을 브로드캐스트하도록 id만 넘긴다.
+// 반환: 만료 개수(0 이상), 인자 오류 시 -1.
+int  npc_despawn_aged(int max_age_sec, int32_t *out_ids, int max_out, int *out_count);
+
 // /sell 시 선착순 매각 — 보드에서 즉시 제거하고 *out에 메타 반환.
 // 반환: 0=성공, -1=없음/이미 다른 사람이 가져감
 int  npc_take(int32_t npc_id, NpcOrder *out);

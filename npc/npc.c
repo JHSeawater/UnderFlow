@@ -2,10 +2,12 @@
 
 #include <string.h>
 #include <pthread.h>
+#include <time.h>
 
 typedef struct {
     int32_t   in_use;
     NpcOrder  order;
+    time_t    spawn_time;
 } NpcSlot;
 
 static NpcSlot          g_board[MAX_NPC_BOARD];
@@ -43,8 +45,9 @@ int npc_spawn(const NpcOrder *npc){
         pthread_mutex_unlock(&g_npc_mutex);
         return -1;
     }
-    g_board[idx].in_use = 1;
-    g_board[idx].order  = *npc;
+    g_board[idx].in_use     = 1;
+    g_board[idx].order      = *npc;
+    g_board[idx].spawn_time = time(NULL);
 
     pthread_mutex_unlock(&g_npc_mutex);
     return 0;
@@ -61,6 +64,28 @@ int npc_despawn(int32_t npc_id){
     memset(&g_board[idx].order, 0, sizeof(NpcOrder));
     pthread_mutex_unlock(&g_npc_mutex);
     return 0;
+}
+
+int npc_despawn_aged(int max_age_sec, int32_t *out_ids, int max_out, int *out_count){
+    if (!out_ids || !out_count || max_out <= 0) return -1;
+
+    time_t now = time(NULL);
+    int n = 0;
+
+    pthread_mutex_lock(&g_npc_mutex);
+    for (int i = 0; i < MAX_NPC_BOARD; i++) {
+        if (g_board[i].in_use &&
+            (now - g_board[i].spawn_time) >= max_age_sec) {
+            if (n < max_out) out_ids[n] = g_board[i].order.npc_id;
+            n++;
+            g_board[i].in_use = 0;
+            memset(&g_board[i].order, 0, sizeof(NpcOrder));
+        }
+    }
+    pthread_mutex_unlock(&g_npc_mutex);
+
+    *out_count = (n < max_out) ? n : max_out;
+    return *out_count;
 }
 
 int npc_take(int32_t npc_id, NpcOrder *out){

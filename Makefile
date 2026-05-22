@@ -26,7 +26,7 @@ TARGET_UI = client_ui
 all: $(TARGET_SERVER) $(TARGET_CLIENT) $(TARGET_UI)
 
 # 헤더 파일 의존성 강제 (protocol.h 수정 시 모든 .c 파일 재빌드)
-$(OBJS_COMMON) $(OBJS_SERVER) $(OBJS_CLIENT): protocol.h
+$(OBJS_COMMON) $(OBJS_SERVER) $(OBJS_CLIENT) ui_client.o: protocol.h
 
 # 서버 빌드 규칙 (공통 모듈 포함)
 $(TARGET_SERVER): $(OBJS_COMMON) $(OBJS_SERVER)

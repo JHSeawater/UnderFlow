@@ -244,12 +244,10 @@ static void handle_sell(int sock, Packet *pkt, const char *my_key, off_t my_offs
     evt.body.npc_despawn.npc_id = npc.npc_id;
     broadcast_packet(&evt);
 
-    // 9) ★ 승리 트리거 검사 — 목표 도달 시 자금 강제 전송 후 게임 종료 신호
-    if (rec.money >= GOAL_MONEY) {
-        rec.money = 0;
-        userdb_update_at(my_offset, &rec);
-        server_trigger_victory(sock);   // A 영역 함수
-    }
+    // 9) 승리/탈출 처리는 3주차 `/payoff` 핸들러로 이전 (기획 변경).
+    //    구 모델의 GOAL_MONEY 자동승리 블록 제거: 새 기획은 자동승리 없이
+    //    명시적 /payoff 탈출 + 유동적 목표액(+2,000, 상한 14,000) + 누적 3명 시
+    //    경찰 습격 리셋이며, server_trigger_victory도 신 모델로 재작성 예정.
 }
 
 

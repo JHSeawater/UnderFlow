@@ -191,5 +191,7 @@ int packet_send(int sockfd, const Packet *pkt) {
     send_pkt.type = htonl(send_pkt.type);
     send_pkt.session_id = htonl(send_pkt.session_id);
 
-    return send(sockfd, &send_pkt, sizeof(Packet), 0);
+    // MSG_NOSIGNAL: 끊긴 소켓에 send 시 SIGPIPE(기본=프로세스 종료) 대신 EPIPE 반환.
+    // 서버·client·client_ui 모두 packet_send를 쓰므로 한 곳 수정으로 전부 보호됨.
+    return send(sockfd, &send_pkt, sizeof(Packet), MSG_NOSIGNAL);
 }
