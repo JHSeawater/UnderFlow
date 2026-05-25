@@ -59,11 +59,12 @@ dkms.conf
 # =======================================================
 
 # 1. Custom Executables (확장자 없는 커스텀 실행 파일)
-server
-client
-monitor
-sandbox_demo
-connect
+/server
+/client
+/client_ui
+/monitor
+/sandbox_demo
+/connect
 
 # 2. Game Data & Logs / Sandbox (동적 생성 데이터베이스 및 로그)
 # 샌드박스의 껍데기 디렉토리는 유지하되, 내부의 지속 변경되는 파일은 푸시/커밋 방지
