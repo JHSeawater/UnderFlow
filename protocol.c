@@ -182,5 +182,5 @@ int packet_send(int sockfd, const Packet *pkt) {
     send_pkt.type = htonl(send_pkt.type);
     send_pkt.session_id = htonl(send_pkt.session_id);
 
-    return send(sockfd, &send_pkt, sizeof(Packet), 0);
+    return send(sockfd, &send_pkt, sizeof(Packet), MSG_NOSIGNAL);
 }

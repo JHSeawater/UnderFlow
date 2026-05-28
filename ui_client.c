@@ -201,6 +201,7 @@ int main(int argc, char *argv[]) {
     char input[INPUT_MAX] = {0};
     int len = 0;
     int running = 1;
+    int server_lost = 0;
 
     while (running) {
         int ch = wgetch(ui.prompt);
@@ -211,11 +212,15 @@ int main(int argc, char *argv[]) {
             FD_ZERO(&readfds);
             FD_SET(sock, &readfds);
             if (select(sock + 1, &readfds, NULL, NULL, &tv) > 0) {
-                if (packet_recv(sock, &pkt) > 0) {
-                    if (pkt.type == PKT_EVT_CHAT) {
-                        wprintw(ui.log, "\n[Broadcast from %s] %s", pkt.body.chat_evt.sender_key, pkt.body.chat_evt.text);
-                        wrefresh(ui.log);
-                    }
+                int recv_rc = packet_recv(sock, &pkt);
+                if (recv_rc <= 0) {
+                    server_lost = 1;
+                    running = 0;
+                    break;
+                }
+                if (pkt.type == PKT_EVT_CHAT) {
+                    wprintw(ui.log, "\n[Broadcast from %s] %s", pkt.body.chat_evt.sender_key, pkt.body.chat_evt.text);
+                    wrefresh(ui.log);
                 }
             }
             continue;
@@ -285,6 +290,10 @@ int main(int argc, char *argv[]) {
     delete_windows(&ui);
     endwin();
 
-    printf("UNDERFLOW UI safely closed.\n");
+    if (server_lost) {
+        printf("[Disconnected] 서버와의 연결이 끊어졌습니다.\n");
+    } else {
+        printf("UNDERFLOW UI safely closed.\n");
+    }
     return 0;
 }
