@@ -61,7 +61,6 @@ static void swap_packet_endian(Packet *pkt) {
             pkt->body.sell_ok.bounty = ntohl(pkt->body.sell_ok.bounty);
             pkt->body.sell_ok.new_money = ntohl(pkt->body.sell_ok.new_money);
             break;
-        case PKT_RES_LOGIN_FAIL:
         case PKT_RES_ERROR:
             pkt->body.error.error_code = ntohl(pkt->body.error.error_code);
             break;
@@ -92,10 +91,6 @@ static void swap_packet_endian(Packet *pkt) {
         case PKT_EVT_POLICE_RAID:
             pkt->body.police_raid.time_limit_sec = ntohl(pkt->body.police_raid.time_limit_sec);
             break;
-        case PKT_EVT_SCOREBOARD:
-            pkt->body.scoreboard.rank        = ntohl(pkt->body.scoreboard.rank);
-            pkt->body.scoreboard.final_money = ntohl(pkt->body.scoreboard.final_money);
-            break;
         default:
             break;
     }
@@ -119,7 +114,6 @@ static void enforce_null_termination(Packet *pkt) {
         case PKT_RES_BUY_OK:
             pkt->body.buy_ok.name[MAX_NAME_LEN - 1] = '\0';
             break;
-        case PKT_RES_LOGIN_FAIL:
         case PKT_RES_ERROR:
             pkt->body.error.reason[MAX_TEXT_LEN - 1] = '\0';
             break;
@@ -139,9 +133,6 @@ static void enforce_null_termination(Packet *pkt) {
         case PKT_EVT_GAME_OVER:
         case PKT_EVT_VICTORY:
             pkt->body.endgame.message[MAX_TEXT_LEN - 1] = '\0';
-            break;
-        case PKT_EVT_SCOREBOARD:
-            pkt->body.scoreboard.winner_key[MAX_KEY_LEN - 1] = '\0';
             break;
         case PKT_RES_INVEN_INFO:
             for(int i = 0; i < MAX_INVEN_SIZE; i++) {
@@ -191,7 +182,5 @@ int packet_send(int sockfd, const Packet *pkt) {
     send_pkt.type = htonl(send_pkt.type);
     send_pkt.session_id = htonl(send_pkt.session_id);
 
-    // MSG_NOSIGNAL: 끊긴 소켓에 send 시 SIGPIPE(기본=프로세스 종료) 대신 EPIPE 반환.
-    // 서버·client·client_ui 모두 packet_send를 쓰므로 한 곳 수정으로 전부 보호됨.
-    return send(sockfd, &send_pkt, sizeof(Packet), MSG_NOSIGNAL);
+    return send(sockfd, &send_pkt, sizeof(Packet), 0);
 }

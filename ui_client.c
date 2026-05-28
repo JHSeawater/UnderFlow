@@ -1,4 +1,3 @@
-#define _XOPEN_SOURCE_EXTENDED 1
 #include <ncurses.h>
 #include <locale.h>
 #include <string.h>
@@ -6,13 +5,11 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <sys/select.h>
-#include <time.h>
 #include "protocol.h"
 
 #define MIN_WIDTH 100
 #define MIN_HEIGHT 30
 #define INPUT_MAX 256
-#define QUICK_HELP "[ /help | ESC: 취소 | /quit: 종료 ]"
 
 typedef struct{
     WINDOW *news;
@@ -23,43 +20,6 @@ typedef struct{
     WINDOW *log;
     WINDOW *prompt;
 }UI;
-
-void get_time_string(char *buf, int size)
-{
-    time_t now = time(NULL);
-    struct tm *t = localtime(&now);
-    snprintf(buf, size, "%02d:%02d:%02d", t->tm_hour, t->tm_min, t->tm_sec);
-}
-
-void log_message(UI *ui, const char *msg)
-{
-    char time_buf[16];
-    get_time_string(time_buf, sizeof(time_buf));
-    wprintw(ui->log, "\n[%s] %s", time_buf, msg);
-    wrefresh(ui->log);
-}
-
-int input_limit_width(void)
-{
-    int h, w;
-    getmaxyx(stdscr, h, w);
-    (void)h;
-    return w - (int)strlen(QUICK_HELP) - 5;
-}
-
-void restore_prompt_cursor(UI *ui, const char *input, int len)
-{
-    int h, w;
-    int help_len = strlen(QUICK_HELP);
-    getmaxyx(ui->prompt, h, w);
-    (void)h;
-    werase(ui->prompt);
-    mvwprintw(ui->prompt, 0, 0, "> %s", input);
-    if (w > help_len + 2)
-        mvwprintw(ui->prompt, 0, w - help_len - 1, "%s", QUICK_HELP);
-    wmove(ui->prompt, 0, len + 2);
-    wrefresh(ui->prompt);
-}
 
 void delete_windows(UI *ui)
 {
@@ -192,17 +152,16 @@ void redraw(UI *ui) {
 
 int main(int argc, char *argv[]) {
     if (argc < 2) {
-        printf("Usage: %s <user_key> [server_ip]\n", argv[0]);
+        printf("Usage: %s <user_key>\n", argv[0]);
         return 1;
     }
     const char *user_key = argv[1];
-    const char *ip = (argc > 2) ? argv[2] : "127.0.0.1";
 
     int sock = socket(PF_INET, SOCK_STREAM, 0);
     struct sockaddr_in serv_addr;
     memset(&serv_addr, 0, sizeof(serv_addr));
     serv_addr.sin_family = AF_INET;
-    serv_addr.sin_addr.s_addr = inet_addr(ip);
+    serv_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
     serv_addr.sin_port = htons(8080);
 
     if (connect(sock, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) == -1) {
@@ -229,7 +188,6 @@ int main(int argc, char *argv[]) {
     noecho();
     keypad(stdscr, TRUE);
     curs_set(1);
-    timeout(0);
 
     UI ui = {0};
 
@@ -243,7 +201,6 @@ int main(int argc, char *argv[]) {
     char input[INPUT_MAX] = {0};
     int len = 0;
     int running = 1;
-    int server_lost = 0;
 
     while (running) {
         int ch = wgetch(ui.prompt);
@@ -254,17 +211,11 @@ int main(int argc, char *argv[]) {
             FD_ZERO(&readfds);
             FD_SET(sock, &readfds);
             if (select(sock + 1, &readfds, NULL, NULL, &tv) > 0) {
-                int recv_rc = packet_recv(sock, &pkt);
-                if (recv_rc <= 0) {
-                    // 서버 단선/크래시: 소켓이 EOF로 계속 readable이라
-                    // 종료 분기가 없으면 무한 busy-loop(CPU 100%, UI 먹통)에 빠진다.
-                    server_lost = 1;
-                    running = 0;
-                    break;
-                }
-                if (pkt.type == PKT_EVT_CHAT) {
-                    wprintw(ui.log, "\n[Broadcast from %s] %s", pkt.body.chat_evt.sender_key, pkt.body.chat_evt.text);
-                    wrefresh(ui.log);
+                if (packet_recv(sock, &pkt) > 0) {
+                    if (pkt.type == PKT_EVT_CHAT) {
+                        wprintw(ui.log, "\n[Broadcast from %s] %s", pkt.body.chat_evt.sender_key, pkt.body.chat_evt.text);
+                        wrefresh(ui.log);
+                    }
                 }
             }
             continue;
@@ -285,9 +236,8 @@ int main(int argc, char *argv[]) {
                 continue;
             }
 
-            char msg[INPUT_MAX + 16];
-            snprintf(msg, sizeof(msg), "[YOU] %s", input);
-            log_message(&ui, msg);
+            wprintw(ui.log, "\n[YOU] %s", input);
+            wrefresh(ui.log);
 
             memset(&pkt, 0, sizeof(Packet));
             pkt.type = PKT_REQ_CHAT;
@@ -308,23 +258,33 @@ int main(int argc, char *argv[]) {
             memset(input, 0, sizeof(input));
         }
         else if (ch >= 32 && ch <= 126) {
-            int limit = input_limit_width();
-            if (len < INPUT_MAX - 1 && len < limit) {
+            int h, w;
+            getmaxyx(stdscr, h, w);
+
+            if (len < INPUT_MAX - 1 && len < w - 45) {
                 input[len] = ch;
                 len++;
                 input[len] = '\0';
             }
         }
 
-        restore_prompt_cursor(&ui, input, len);
+        int h, w;
+        getmaxyx(stdscr, h, w);
+
+        werase(ui.prompt);
+        mvwprintw(ui.prompt, 0, 0, "> %s", input);
+
+        if (w >= 45) {
+            mvwprintw(ui.prompt, 0, w - 40,
+                      "[ /help | ESC: 취소 | /quit: 종료 ]");
+        }
+
+        wrefresh(ui.prompt);
     }
 
     delete_windows(&ui);
     endwin();
 
-    if (server_lost)
-        printf("[Disconnected] 서버와의 연결이 끊어졌습니다.\n");
-    else
-        printf("UNDERFLOW UI safely closed.\n");
+    printf("UNDERFLOW UI safely closed.\n");
     return 0;
 }

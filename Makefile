@@ -9,7 +9,7 @@ LDFLAGS_CLIENT = -pthread -lncursesw
 
 # 소스 파일 자동 탐색
 SRCS_COMMON = $(wildcard src/common/*.c) protocol.c
-SRCS_SERVER = $(wildcard src/server/*.c userdb/*.c handlers/*.c market/*.c npc/*.c sandbox/*.c)
+SRCS_SERVER = $(wildcard src/server/*.c userdb/*.c)
 SRCS_CLIENT = $(wildcard src/client/*.c)
 
 # 오브젝트 파일 변환
@@ -26,7 +26,7 @@ TARGET_UI = client_ui
 all: $(TARGET_SERVER) $(TARGET_CLIENT) $(TARGET_UI)
 
 # 헤더 파일 의존성 강제 (protocol.h 수정 시 모든 .c 파일 재빌드)
-$(OBJS_COMMON) $(OBJS_SERVER) $(OBJS_CLIENT) ui_client.o: protocol.h
+$(OBJS_COMMON) $(OBJS_SERVER) $(OBJS_CLIENT): protocol.h
 
 # 서버 빌드 규칙 (공통 모듈 포함)
 $(TARGET_SERVER): $(OBJS_COMMON) $(OBJS_SERVER)
@@ -45,7 +45,6 @@ $(TARGET_UI): $(OBJS_COMMON) ui_client.o
 
 # 빌드 결과물 청소 (make clean)
 clean:
-	rm -f $(OBJS_COMMON) $(OBJS_SERVER) $(OBJS_CLIENT) ui_client.o \
-	      $(TARGET_SERVER) $(TARGET_CLIENT) $(TARGET_UI)
+	rm -f $(OBJS_COMMON) $(OBJS_SERVER) $(OBJS_CLIENT) $(TARGET_SERVER) $(TARGET_CLIENT)
 
 .PHONY: all clean
