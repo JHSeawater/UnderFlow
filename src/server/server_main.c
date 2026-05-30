@@ -7,6 +7,7 @@
 #include <pthread.h>
 #include <arpa/inet.h>
 #include "protocol.h"
+#include <fcntl.h>
 #include "userdb/userdb.h"
 #include "src/server/market.h"
 #include "src/server/sandbox.h"
@@ -20,6 +21,45 @@
 int client_sockets[MAX_CLIENTS];
 char active_keys[MAX_CLIENTS][MAX_KEY_LEN];
 pthread_mutex_t clients_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+void broadcast_packet(Packet *pkt);
+
+static int32_t g_goal_money = 10000;
+static int     g_escaped_count = 0;
+static int     g_raid_active = 0;
+
+static void userdb_burn_all(void) {
+    int fd = open("./data/users.dat", O_RDONLY);
+    if (fd == -1) return;
+    
+    UserRecord rec;
+    off_t offset = 0;
+    while (read(fd, &rec, sizeof(UserRecord)) == sizeof(UserRecord)) {
+        userdb_burn_at(offset);
+        offset += sizeof(UserRecord);
+    }
+    close(fd);
+}
+
+static void* raid_timer_thread(void* arg) {
+    (void)arg;
+    g_raid_active = 1;
+    sleep(60);
+    if (g_raid_active) {
+        g_raid_active = 0;
+        
+        Packet gameover;
+        memset(&gameover, 0, sizeof(Packet));
+        gameover.type = PKT_EVT_GAME_OVER;
+        snprintf(gameover.body.endgame.message, MAX_TEXT_LEN,
+                 "경찰 급습 레이드 실패! 샌드박스가 수색되어 자산이 영구 소각되었습니다.");
+        broadcast_packet(&gameover);
+        
+        userdb_burn_all();
+        printf("[Server] Police Raid Timer expired! All users burned.\n");
+    }
+    return NULL;
+}
 
 // 패킷 방송
 void broadcast_packet(Packet *pkt) {
@@ -433,11 +473,7 @@ static void handle_sell(int sock, const char *key, Packet *pkt) {
     userdb_find(key, &rec, &offset);
     rec.money += npc.bounty;
 
-    // 7. 승리 트리거 — 목표액 도달 시 자금 회수 + 게임 종료 브로드캐스트
-    int is_winner = (rec.money >= GOAL_MONEY);
-    if (is_winner) {
-        rec.money = 0;  // 자금 강제 회수
-    }
+    // 7. 자금 업데이트
     userdb_update_at(offset, &rec);
 
     // 8. 응답
@@ -454,22 +490,112 @@ static void handle_sell(int sock, const char *key, Packet *pkt) {
     despawn.type = PKT_EVT_NPC_DESPAWN;
     despawn.body.npc_despawn.npc_id = npc_id;
     broadcast_packet(&despawn);
+}
 
-    // 10. 승리자 발생 시 게임 오버 전체 방송 (Role A 트리거)
-    if (is_winner) {
-        Packet victory;
-        memset(&victory, 0, sizeof(Packet));
-        victory.type = PKT_EVT_VICTORY;
-        snprintf(victory.body.endgame.message, MAX_TEXT_LEN,
-                 "모든 빚을 갚았군. 약속대로 넌 이제 자유다.");
-        unicast_to_key(key, &victory);
+// ============================================================
+// 핸들러: /payoff (3주차 수동 채무 상환 및 경찰 습격 리셋 트리거)
+// ============================================================
+static void handle_payoff(int sock, const char *key) {
+    UserRecord rec;
+    off_t offset;
+    if (userdb_find(key, &rec, &offset) != 0) {
+        send_error(sock, ERR_INVALID_SESSION, "유저 정보 조회 실패");
+        return;
+    }
 
-        Packet gameover;
-        memset(&gameover, 0, sizeof(Packet));
-        gameover.type = PKT_EVT_GAME_OVER;
-        snprintf(gameover.body.endgame.message, MAX_TEXT_LEN,
-                 "약속을 지키지 못했군. 남은 빚은 목숨으로 받지. (승리자: %s)", key);
-        broadcast_packet(&gameover);
+    if (rec.money < g_goal_money) {
+        char err_msg[MAX_TEXT_LEN];
+        snprintf(err_msg, sizeof(err_msg), "상환금 부족: 목표 청산액은 $%d 이나, 당신은 $%d 보유하고 있습니다.",
+                 g_goal_money, rec.money);
+        send_error(sock, ERR_NOT_ENOUGH_MONEY, err_msg);
+        return;
+    }
+
+    // 빚 청산 성공! 자금 몰수 후 DB 업데이트
+    rec.money = 0;
+    userdb_update_at(offset, &rec);
+
+    g_escaped_count++;
+
+    // 1. 본인에게 승리 탈출 전송 (PKT_EVT_VICTORY)
+    Packet victory;
+    memset(&victory, 0, sizeof(Packet));
+    victory.type = PKT_EVT_VICTORY;
+    snprintf(victory.body.endgame.message, MAX_TEXT_LEN,
+             "축하합니다! $%d의 채무를 성공적으로 청산하고 다크웹을 탈출하셨습니다.", g_goal_money);
+    packet_send(sock, &victory);
+
+    // 2. 다른 모든 유저들에게 브로드캐스트 안내
+    Packet evt;
+    memset(&evt, 0, sizeof(Packet));
+    evt.type = PKT_EVT_CHAT;
+    strncpy(evt.body.chat_evt.sender_key, "[SYSTEM]", MAX_KEY_LEN - 1);
+    snprintf(evt.body.chat_evt.text, MAX_TEXT_LEN - 1,
+             "해커 '%s'님이 $%d의 빚을 갚고 탈출했습니다! 은행 보안 강화로 다음 목표 상환액이 $%d로 인상됩니다.",
+             key, g_goal_money, g_goal_money + 5000);
+    broadcast_packet(&evt);
+
+    // 3. 목표 상환액 인상
+    g_goal_money += 5000;
+
+    printf("[Server] User '%s' paid off! Escaped count: %d, New Goal: %d\n",
+           key, g_escaped_count, g_goal_money);
+
+    // 4. 누적 3명 도달 시 경찰 습격 리셋 트리거 발송
+    if (g_escaped_count >= 3) {
+        Packet raid;
+        memset(&raid, 0, sizeof(Packet));
+        raid.type = PKT_EVT_POLICE_RAID;
+        strncpy(raid.body.police_raid.passcode, "PURGE", MAX_KEY_LEN - 1);
+        raid.body.police_raid.time_limit_sec = 60;
+        broadcast_packet(&raid);
+
+        Packet hint;
+        memset(&hint, 0, sizeof(Packet));
+        hint.type = PKT_EVT_CHAT;
+        strncpy(hint.body.chat_evt.sender_key, "[ALERT]", MAX_KEY_LEN - 1);
+        strncpy(hint.body.chat_evt.text,
+                "누적 3명 탈출로 경찰 급습이 시작되었습니다! 60초 뒤 샌드박스가 수색 및 자산 소각 처리됩니다. 우회 암호 'PURGE'를 입력하여 대응하십시오!",
+                MAX_TEXT_LEN - 1);
+        broadcast_packet(&hint);
+
+        // 60초 타이머 스레드 구동
+        pthread_t tid;
+        if (pthread_create(&tid, NULL, raid_timer_thread, NULL) == 0) {
+            pthread_detach(tid);
+        }
+    }
+}
+
+// ============================================================
+// 핸들러: /minigame_submit (경찰 습격 방탈출 제출)
+// ============================================================
+static void handle_minigame_submit(int sock, const char *key, Packet *pkt) {
+    if (!g_raid_active) {
+        send_error(sock, ERR_INVALID_SESSION, "현재 활성화된 경찰 습격이 없습니다.");
+        return;
+    }
+
+    if (strcmp(pkt->body.minigame.passcode, "PURGE") == 0) {
+        // 타이머 조기 해제 및 전체 복구!
+        g_raid_active = 0;
+
+        Packet res;
+        memset(&res, 0, sizeof(Packet));
+        res.type = PKT_RES_MINIGAME_OK;
+        broadcast_packet(&res);
+
+        Packet evt;
+        memset(&evt, 0, sizeof(Packet));
+        evt.type = PKT_EVT_CHAT;
+        strncpy(evt.body.chat_evt.sender_key, "[SYSTEM]", MAX_KEY_LEN - 1);
+        snprintf(evt.body.chat_evt.text, MAX_TEXT_LEN - 1,
+                 "해커 '%s'님이 우회 암호를 입력하여 경찰 급습을 무력화시켰습니다! 모든 자산이 안전하게 보존되었습니다.", key);
+        broadcast_packet(&evt);
+
+        printf("[Server] User '%s' successfully resolved Police Raid minigame!\n", key);
+    } else {
+        send_error(sock, ERR_INVALID_SESSION, "우회 암호가 일치하지 않습니다.");
     }
 }
 
@@ -647,7 +773,7 @@ void* client_handler(void* arg) {
             res.type = PKT_RES_LOGIN_OK;
             res.body.login_ok.assigned_session_id = sock;
             res.body.login_ok.money = rec.money;
-            res.body.login_ok.goal_money = GOAL_MONEY;
+            res.body.login_ok.goal_money = g_goal_money;
             packet_send(sock, &res);
 
             // 늦은 접속자 동기화: 현재 시장 매물과 NPC 의뢰를 이 클라이언트에만 유니캐스트.
@@ -693,14 +819,21 @@ void* client_handler(void* arg) {
         switch (pkt.type) {
             case PKT_REQ_CHAT: {
                 printf("[Server] Chat from %s: %s\n", my_key, pkt.body.chat.text);
-                Packet evt;
-                memset(&evt, 0, sizeof(Packet));
-                evt.type = PKT_EVT_CHAT;
-                strncpy(evt.body.chat_evt.text, pkt.body.chat.text, MAX_TEXT_LEN - 1);
-                strncpy(evt.body.chat_evt.sender_key, my_key, MAX_KEY_LEN - 1);
-                broadcast_packet(&evt);
+                if (strcmp(pkt.body.chat.text, "/payoff") == 0) {
+                    handle_payoff(sock, my_key);
+                } else {
+                    Packet evt;
+                    memset(&evt, 0, sizeof(Packet));
+                    evt.type = PKT_EVT_CHAT;
+                    strncpy(evt.body.chat_evt.text, pkt.body.chat.text, MAX_TEXT_LEN - 1);
+                    strncpy(evt.body.chat_evt.sender_key, my_key, MAX_KEY_LEN - 1);
+                    broadcast_packet(&evt);
+                }
                 break;
             }
+            case PKT_REQ_MINIGAME_SUBMIT:
+                handle_minigame_submit(sock, my_key, &pkt);
+                break;
             case PKT_REQ_BUY:
                 handle_buy(sock, my_key, &pkt);
                 if (check_bankruptcy(sock, my_key)) goto disconnect;
