@@ -56,25 +56,8 @@ dkms.conf
 
 # Custom Executables (Makefile 산출물 — 커밋 금지, 각자 빌드)
 /server
-/client
 /client_ui
-/monitor
-/sandbox_demo
-/connect
-
-# 실험/임시 실행파일 (추적 제외, 디스크엔 유지)
-/print_size
-/test_flow
-/test_victory_change
-
-# 실험/임시 소스 (추적 제외, 디스크엔 유지 — 참고용 ui_engine.c는 커밋함)
-/print_size.c
-/test_flow.c
-/sandbox_demo.c
-
-# 잘못 커밋됐던 임시 파일 (추적 제외, 디스크엔 유지)
-/Screen
-/Test
+/watchdog
 
 # Game Data & Logs / Sandbox (서버가 런타임에 mkdir로 자동 생성)
 /data/users/*
@@ -91,9 +74,13 @@ dkms.conf
 .DS_Store
 .vscode/
 .idea/
-.cursorrules
+.claude/
 
-# 커밋 제외 문서 (나머지 .md 문서 — GDD/Task/Schedule/Worktable/README는 정상 커밋됨)
+# 제출 무관 파일 — Git 추적 제외 (로컬 작업용으로만 유지)
+#  - docs/  : 내부 기획 문서(GDD/Task/Schedule/Worktable/BUGFIX). 제출 문서는 README.md만.
+#  - tests/ : Python 통합 테스트(개발 검증용). .cursorrules "C only" 규정상 제출 제외.
+#  - .cursorrules / CLAUDE.md : AI 보조 규칙 파일.
+.cursorrules
 CLAUDE.md
-temp.md
-BUGFIX_REPORT.md
+/docs/
+/tests/

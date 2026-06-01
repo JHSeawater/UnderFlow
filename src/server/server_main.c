@@ -6,59 +6,464 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <arpa/inet.h>
+#include <signal.h>
 #include "protocol.h"
 #include <fcntl.h>
 #include "userdb/userdb.h"
 #include "src/server/market.h"
 #include "src/server/sandbox.h"
+#include "src/server/events.h"
 
-#define PORT           8080
-#define MAX_CLIENTS    10
-#define INITIAL_MONEY  1000
-#define GOAL_MONEY     10000
-#define RUMOR_FEE      500
+#define PORT             8080
+#define MAX_CLIENTS      10
+// INITIAL_MONEY, GOAL_MONEY는 protocol.h에서 공유
+#define DEBT_RAISE_STEP  2000    // GDD §F: 탈출자 1명 발생 시 +2,000원 인상
+#define DEBT_CAP         14000   // GDD §F: 목표 상환액 상한선
+#define RUMOR_FEE          500
+#define RUMOR_COOLDOWN_SEC  30   // GDD §B: 서버 공유 쿨다운 (연속 사용 차단)
 
 int client_sockets[MAX_CLIENTS];
 char active_keys[MAX_CLIENTS][MAX_KEY_LEN];
 pthread_mutex_t clients_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-void broadcast_packet(Packet *pkt);
-
-static int32_t g_goal_money = 10000;
-static int     g_escaped_count = 0;
-static int     g_raid_active = 0;
-
-static void userdb_burn_all(void) {
-    int fd = open("./data/users.dat", O_RDONLY);
-    if (fd == -1) return;
-    
-    UserRecord rec;
-    off_t offset = 0;
-    while (read(fd, &rec, sizeof(UserRecord)) == sizeof(UserRecord)) {
-        userdb_burn_at(offset);
-        offset += sizeof(UserRecord);
-    }
-    close(fd);
+static int count_bits(uint32_t v) {
+    int n = 0;
+    while (v) { n += (int)(v & 1u); v >>= 1; }
+    return n;
 }
 
-static void* raid_timer_thread(void* arg) {
+void broadcast_packet(Packet *pkt);
+int  unicast_to_key(const char *target_key, Packet *pkt);
+static void send_error(int sock, int32_t code, const char *reason);
+
+// 라운드 전역 상태 (락 순서: g_round_mutex → clients_mutex)
+pthread_mutex_t g_round_mutex = PTHREAD_MUTEX_INITIALIZER;
+int32_t g_goal_money       = GOAL_MONEY;
+static int     g_escaped_count    = 0;
+static int     g_round_end_active = 0;   // 라운드 종료 카운트다운 진행 중 (중복 트리거 가드)
+time_t  g_cap_reached_at   = 0;   // DEBT_CAP 최초 도달 시각 (0 = 미도달). 5분 경과 시 라운드 리셋 트리거.
+#define ROUND_END_COUNTDOWN_SEC 60       // GDD §F: 스코어보드/에필로그 노출 시간
+
+// GDD §F 탈출 로그 (g_round_mutex 보호)
+typedef struct {
+    char    key[MAX_KEY_LEN];
+    int32_t money_at_escape;
+    int32_t escape_order;
+} EscapeLogEntry;
+static EscapeLogEntry g_escape_log[MAX_SCORE_ESCAPED];
+
+// /rumor 서버 공유 쿨다운 (GDD §B). g_round_mutex와 의미가 달라 별도 락 사용.
+// 락 순서: g_rumor_mutex → g_userdb_mutex (수수료 차감 시).
+static pthread_mutex_t g_rumor_mutex   = PTHREAD_MUTEX_INITIALIZER;
+static time_t          g_rumor_cd_until = 0;
+
+// §D 주기 경찰 레이드 (라운드 종료 §F와 완전 독립)
+// 락 순서: g_periodic_raid_mutex → clients_mutex (스냅샷용)
+#define PERIODIC_RAID_TIME_LIMIT_SEC  15
+#define PERIODIC_RAID_MIN_INTERVAL    360   // 6분
+#define PERIODIC_RAID_MAX_INTERVAL    600   // 10분
+static pthread_mutex_t g_periodic_raid_mutex = PTHREAD_MUTEX_INITIALIZER;
+static time_t          g_periodic_raid_deadline = 0;   // 0 = no active raid
+static char            g_periodic_raid_pending_keys[MAX_CLIENTS][MAX_KEY_LEN];
+static char            g_periodic_raid_passcode[MAX_TEXT_LEN]; // 현재 레이드 우회 암호 (위 뮤텍스 보호)
+
+// 레이드마다 무작위로 하나 선택되는 우회 암호 후보 (난이도 ↑)
+static const char *RAID_PASSCODES[] = {
+    "pUrge", "OverRidE", "BLAckOUt", "FiRewALL",
+    "GHOsT", "ZeROdAy", "LoCkDOWN", "SHadOW", "UNdErFLOW", "pASSWORD", "DEADLINE", "dEBUG", 
+    "WhITeHaT", "BLAcKHAt", "BLAckBoX", "WhITeBOx"
+};
+#define RAID_PASSCODE_COUNT ((int)(sizeof(RAID_PASSCODES) / sizeof(RAID_PASSCODES[0])))
+
+static const char* pick_raid_passcode(void) {
+    return RAID_PASSCODES[rand() % RAID_PASSCODE_COUNT];
+}
+
+// 시드 데이터 재투입은 파일 하단에 정의돼 있어 전방 선언이 필요함
+static void seed_market_and_npc(void);
+
+// ============================================================
+// 라운드 리셋 시퀀스 (GDD §F):
+//   "1분 후 모든 유저 데이터(빚 10,000원, 초기자본 1,000원)와 마켓을
+//    원래 상태로 깨끗이 리셋하여 새로운 라운드를 자동 개시"
+// 호출 경로:
+//   1) 누적 3명 탈출 → fire_round_end_countdown → round_end_timer_thread → 60초 후
+//   2) DEBT_CAP 도달 5분 경과 → event_thread → fire_round_end_countdown → 60초 후
+// 클라이언트는 endgame.message의 "__ROUND_RESET__|" 마커로 종료가 아닌
+// 라운드 리셋임을 구분한다.
+// ============================================================
+static void trigger_round_reset(void) {
+    // 1. 실물 파일(마스터/샌드박스 doc_*.dat) 일괄 청소
+    sandbox_global_reset();
+
+    // 2. users.dat 활성 레코드 → 초기자본 복원 (소각 -1은 보존)
+    userdb_reset_round(INITIAL_MONEY);
+
+    // 3. 인메모리 시장/NPC/동결 마스크 초기화
+    market_init();
+
+    // 4. 라운드 상태 변수 복원
+    pthread_mutex_lock(&g_round_mutex);
+    g_goal_money       = GOAL_MONEY;
+    g_escaped_count    = 0;
+    g_round_end_active = 0;
+    g_cap_reached_at   = 0;
+    memset(g_escape_log, 0, sizeof(g_escape_log));   // 탈출 로그 초기화
+    pthread_mutex_unlock(&g_round_mutex);
+
+    // /rumor 쿨다운도 라운드와 함께 초기화
+    pthread_mutex_lock(&g_rumor_mutex);
+    g_rumor_cd_until = 0;
+    pthread_mutex_unlock(&g_rumor_mutex);
+
+    // 5. 시드 매물·NPC 재투입 (라이브 매물이 한 개도 없는 빈 마켓 방지)
+    seed_market_and_npc();
+
+    // 6. 클라이언트에 라운드 리셋 마커 broadcast
+    Packet pkt;
+    memset(&pkt, 0, sizeof(Packet));
+    pkt.type = PKT_EVT_GAME_OVER;
+    snprintf(pkt.body.endgame.message, MAX_TEXT_LEN,
+             "__ROUND_RESET__|새 라운드가 시작되었습니다. 모든 자산이 초기 상태로 복원되었습니다.");
+    broadcast_packet(&pkt);
+
+    // 7. 시드된 매물·NPC를 모든 접속 클라에 동기화 broadcast
+    {
+        MarketSlot mkt_items[MAX_MARKET_SLOTS];
+        int mkt_count = 0;
+        market_snapshot(mkt_items, MAX_MARKET_SLOTS, &mkt_count);
+        for (int i = 0; i < mkt_count; i++) {
+            Packet sp;
+            memset(&sp, 0, sizeof(Packet));
+            sp.type = PKT_EVT_MARKET_SPAWN;
+            sp.body.market_spawn.doc_id     = mkt_items[i].doc_id;
+            sp.body.market_spawn.tags       = mkt_items[i].tags;
+            sp.body.market_spawn.base_price = mkt_items[i].base_price;
+            strncpy(sp.body.market_spawn.name, mkt_items[i].name, MAX_NAME_LEN - 1);
+            broadcast_packet(&sp);
+        }
+
+        NPCSlot npc_items[MAX_NPC_SLOTS];
+        int npc_count = 0;
+        npc_snapshot(npc_items, MAX_NPC_SLOTS, &npc_count);
+        for (int i = 0; i < npc_count; i++) {
+            Packet sp;
+            memset(&sp, 0, sizeof(Packet));
+            sp.type = PKT_EVT_NPC_SPAWN;
+            sp.body.npc_spawn.npc_id        = npc_items[i].npc_id;
+            sp.body.npc_spawn.required_tags = npc_items[i].required_tags;
+            sp.body.npc_spawn.bounty        = npc_items[i].bounty;
+            broadcast_packet(&sp);
+        }
+    }
+
+    printf("[Server] === ROUND RESET === goal=$%d, escaped=0\n", GOAL_MONEY);
+}
+
+// 라운드 종료 카운트다운 종료 후 자동 라운드 리셋 (GDD §F).
+// 호출 전 g_round_end_active=1을 트리거 측이 락 안에서 세팅해 둠.
+static void* round_end_timer_thread(void* arg) {
     (void)arg;
-    g_raid_active = 1;
-    sleep(60);
-    if (g_raid_active) {
-        g_raid_active = 0;
-        
-        Packet gameover;
-        memset(&gameover, 0, sizeof(Packet));
-        gameover.type = PKT_EVT_GAME_OVER;
-        snprintf(gameover.body.endgame.message, MAX_TEXT_LEN,
-                 "경찰 급습 레이드 실패! 샌드박스가 수색되어 자산이 영구 소각되었습니다.");
-        broadcast_packet(&gameover);
-        
-        userdb_burn_all();
-        printf("[Server] Police Raid Timer expired! All users burned.\n");
+    sleep(ROUND_END_COUNTDOWN_SEC);
+
+    int should_fire = 0;
+    pthread_mutex_lock(&g_round_mutex);
+    if (g_round_end_active) {
+        should_fire = 1;
+        // g_round_end_active 리셋은 trigger_round_reset이 수행
+    }
+    pthread_mutex_unlock(&g_round_mutex);
+
+    if (should_fire) {
+        printf("[Server] Round End Countdown expired -> ROUND RESET\n");
+        trigger_round_reset();
     }
     return NULL;
+}
+
+// ============================================================
+// §D 주기 경찰 레이드 — 개별 처리 미니게임
+// ============================================================
+
+// 특정 KEY의 계정/샌드박스를 영구 소각하고 단일 GAME_OVER를 송신.
+// 호출자는 어떤 락도 보유하지 말 것 (userdb/sandbox 자체 락 사용).
+static void burn_user_by_key(const char *key) {
+    UserRecord rec;
+    off_t offset;
+    if (userdb_find(key, &rec, &offset) == 0) {
+        userdb_burn_at(offset);    // money=-1 + 인벤 클리어
+    }
+    sandbox_purge_user(key);       // 실제 doc_*.dat 일괄 unlink
+
+    Packet go;
+    memset(&go, 0, sizeof(Packet));
+    go.type = PKT_EVT_GAME_OVER;
+    snprintf(go.body.endgame.message, MAX_TEXT_LEN,
+             "경찰 추적망에 포착되었습니다! 계정 데이터가 영구 소각됩니다.");
+    unicast_to_key(key, &go);
+
+    printf("[Server] BURN user='%s' (raid failure)\n", key);
+}
+
+// raid 발사 후 제한 시간이 지나면 미응답자를 일괄 소각한다.
+// 호출자가 락 안에서 g_periodic_raid_deadline 세팅 + pending_keys 채워둠.
+static void* periodic_raid_timeout_thread(void* arg) {
+    (void)arg;
+    sleep(PERIODIC_RAID_TIME_LIMIT_SEC);
+
+    // pending list 스냅샷 (락 안에서) → 해제 후 소각 처리
+    char victims[MAX_CLIENTS][MAX_KEY_LEN];
+    int  victim_cnt = 0;
+
+    pthread_mutex_lock(&g_periodic_raid_mutex);
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        if (g_periodic_raid_pending_keys[i][0] != 0) {
+            strncpy(victims[victim_cnt], g_periodic_raid_pending_keys[i], MAX_KEY_LEN - 1);
+            victims[victim_cnt][MAX_KEY_LEN - 1] = '\0';
+            victim_cnt++;
+            g_periodic_raid_pending_keys[i][0] = 0;
+        }
+    }
+    g_periodic_raid_deadline = 0;
+    pthread_mutex_unlock(&g_periodic_raid_mutex);
+
+    for (int i = 0; i < victim_cnt; i++) {
+        burn_user_by_key(victims[i]);
+    }
+    return NULL;
+}
+
+// event_thread가 6~10분마다 호출. 이미 진행 중인 raid가 있으면 skip.
+void fire_periodic_police_raid(void) {
+    char passcode[MAX_TEXT_LEN];
+    pthread_mutex_lock(&g_periodic_raid_mutex);
+    if (g_periodic_raid_deadline != 0) {
+        pthread_mutex_unlock(&g_periodic_raid_mutex);
+        return;
+    }
+    g_periodic_raid_deadline = time(NULL) + PERIODIC_RAID_TIME_LIMIT_SEC;
+    strncpy(g_periodic_raid_passcode, pick_raid_passcode(), MAX_TEXT_LEN - 1);
+    g_periodic_raid_passcode[MAX_TEXT_LEN - 1] = '\0';
+    strncpy(passcode, g_periodic_raid_passcode, MAX_TEXT_LEN - 1);
+    passcode[MAX_TEXT_LEN - 1] = '\0';
+
+    // 현재 active 유저 KEY 스냅샷 → pending 목록
+    memset(g_periodic_raid_pending_keys, 0, sizeof(g_periodic_raid_pending_keys));
+    pthread_mutex_lock(&clients_mutex);
+    int pending_cnt = 0;
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        if (client_sockets[i] != 0 && active_keys[i][0] != 0) {
+            strncpy(g_periodic_raid_pending_keys[pending_cnt],
+                    active_keys[i], MAX_KEY_LEN - 1);
+            g_periodic_raid_pending_keys[pending_cnt][MAX_KEY_LEN - 1] = '\0';
+            pending_cnt++;
+        }
+    }
+    pthread_mutex_unlock(&clients_mutex);
+    pthread_mutex_unlock(&g_periodic_raid_mutex);
+
+    // 접속자 0명이면 raid 의미 없음 — 롤백
+    if (pending_cnt == 0) {
+        pthread_mutex_lock(&g_periodic_raid_mutex);
+        g_periodic_raid_deadline = 0;
+        pthread_mutex_unlock(&g_periodic_raid_mutex);
+        return;
+    }
+
+    // 락 밖에서 broadcast + 타이머 스레드 파생
+    Packet raid;
+    memset(&raid, 0, sizeof(Packet));
+    raid.type = PKT_EVT_POLICE_RAID;
+    strncpy(raid.body.police_raid.passcode, passcode, MAX_TEXT_LEN - 1);
+    raid.body.police_raid.time_limit_sec = PERIODIC_RAID_TIME_LIMIT_SEC;
+    broadcast_packet(&raid);
+
+    Packet hint;
+    memset(&hint, 0, sizeof(Packet));
+    hint.type = PKT_EVT_CHAT;
+    strncpy(hint.body.chat_evt.sender_key, "[ALERT]", MAX_KEY_LEN - 1);
+    snprintf(hint.body.chat_evt.text, MAX_TEXT_LEN - 1,
+             "경찰 추적망 활성화! %d초 안에 우회 암호 '%.32s'를 정확히 입력하지 못하면 계정이 영구 소각됩니다.",
+             PERIODIC_RAID_TIME_LIMIT_SEC, passcode);
+    broadcast_packet(&hint);
+
+    pthread_t tid;
+    if (pthread_create(&tid, NULL, periodic_raid_timeout_thread, NULL) == 0) {
+        pthread_detach(tid);
+    } else {
+        // 파생 실패 — raid 상태 롤백 (영구 미응답 방지)
+        pthread_mutex_lock(&g_periodic_raid_mutex);
+        g_periodic_raid_deadline = 0;
+        memset(g_periodic_raid_pending_keys, 0, sizeof(g_periodic_raid_pending_keys));
+        pthread_mutex_unlock(&g_periodic_raid_mutex);
+    }
+
+    printf("[Event] Periodic Police Raid fired — %d users pending (%ds)\n",
+           pending_cnt, PERIODIC_RAID_TIME_LIMIT_SEC);
+}
+
+// 디버그/시연용: 요청자 자신만 대상으로 §D 경찰 레이드를 즉시 발사한다.
+// fire_periodic_police_raid와 동일한 공유 상태(g_periodic_raid_*)를 사용하므로
+// 이미 진행 중인 레이드가 있으면 skip한다. 이후 PURGE 탈출·오답 소각·타임아웃은
+// 모두 기존 handle_minigame_submit + periodic_raid_timeout_thread 경로를 그대로 탄다.
+static void fire_self_police_raid(int sock, const char *key) {
+    char passcode[MAX_TEXT_LEN];
+    pthread_mutex_lock(&g_periodic_raid_mutex);
+    if (g_periodic_raid_deadline != 0) {
+        pthread_mutex_unlock(&g_periodic_raid_mutex);
+        send_error(sock, ERR_INVALID_SESSION, "이미 진행 중인 경찰 레이드가 있습니다.");
+        return;
+    }
+    g_periodic_raid_deadline = time(NULL) + PERIODIC_RAID_TIME_LIMIT_SEC;
+    strncpy(g_periodic_raid_passcode, pick_raid_passcode(), MAX_TEXT_LEN - 1);
+    g_periodic_raid_passcode[MAX_TEXT_LEN - 1] = '\0';
+    strncpy(passcode, g_periodic_raid_passcode, MAX_TEXT_LEN - 1);
+    passcode[MAX_TEXT_LEN - 1] = '\0';
+    memset(g_periodic_raid_pending_keys, 0, sizeof(g_periodic_raid_pending_keys));
+    strncpy(g_periodic_raid_pending_keys[0], key, MAX_KEY_LEN - 1);
+    g_periodic_raid_pending_keys[0][MAX_KEY_LEN - 1] = '\0';
+    pthread_mutex_unlock(&g_periodic_raid_mutex);
+
+    Packet raid;
+    memset(&raid, 0, sizeof(Packet));
+    raid.type = PKT_EVT_POLICE_RAID;
+    strncpy(raid.body.police_raid.passcode, passcode, MAX_TEXT_LEN - 1);
+    raid.body.police_raid.time_limit_sec = PERIODIC_RAID_TIME_LIMIT_SEC;
+    packet_send(sock, &raid);
+
+    pthread_t tid;
+    if (pthread_create(&tid, NULL, periodic_raid_timeout_thread, NULL) == 0) {
+        pthread_detach(tid);
+    } else {
+        // 파생 실패 — raid 상태 롤백 (영구 미응답 방지)
+        pthread_mutex_lock(&g_periodic_raid_mutex);
+        g_periodic_raid_deadline = 0;
+        memset(g_periodic_raid_pending_keys, 0, sizeof(g_periodic_raid_pending_keys));
+        pthread_mutex_unlock(&g_periodic_raid_mutex);
+        send_error(sock, ERR_INVALID_SESSION, "레이드 타이머 생성 실패.");
+        return;
+    }
+
+    printf("[Debug] Self police raid fired for '%s' (%ds)\n",
+           key, PERIODIC_RAID_TIME_LIMIT_SEC);
+}
+
+// GDD §F 라운드 종료 카운트다운: 스코어보드 데이터 수집 + broadcast + 60초 후 라운드 리셋.
+// 중복 발사 방지를 위해 g_round_end_active를 내부에서 선점한다(첫 호출만 진행).
+// 스레드 파생 실패 시 g_round_end_active를 롤백한다.
+// §D 주기 경찰 레이드(PKT_EVT_POLICE_RAID + 미니게임)와는 완전 별개 시퀀스.
+void fire_round_end_countdown(const char *announce_text) {
+    // 0. 중복 발사 방지: g_round_end_active를 선점한 첫 호출만 진행 (나머지는 즉시 반환).
+    //    payoff(3인 탈출)·DEBT_CAP 만기·디버그 트리거가 겹쳐 들어와도 한 번만 발동된다.
+    pthread_mutex_lock(&g_round_mutex);
+    if (g_round_end_active) {
+        pthread_mutex_unlock(&g_round_mutex);
+        return;
+    }
+    g_round_end_active = 1;
+    pthread_mutex_unlock(&g_round_mutex);
+
+    // 1. 탈출 로그 스냅샷 (g_round_mutex 한 번만 잡음)
+    ScoreEscaped escaped_snap[MAX_SCORE_ESCAPED];
+    int escaped_snap_cnt = 0;
+    pthread_mutex_lock(&g_round_mutex);
+    escaped_snap_cnt = g_escaped_count < MAX_SCORE_ESCAPED
+                       ? g_escaped_count : MAX_SCORE_ESCAPED;
+    for (int i = 0; i < escaped_snap_cnt; i++) {
+        memset(&escaped_snap[i], 0, sizeof(ScoreEscaped));
+        strncpy(escaped_snap[i].key, g_escape_log[i].key, MAX_KEY_LEN - 1);
+        escaped_snap[i].money_at_escape = g_escape_log[i].money_at_escape;
+        escaped_snap[i].escape_order    = g_escape_log[i].escape_order;
+    }
+    pthread_mutex_unlock(&g_round_mutex);
+
+    // 2. 접속자 KEY 스냅샷 (clients_mutex 보유 최소화)
+    char snap_keys[MAX_CLIENTS][MAX_KEY_LEN];
+    int  snap_cnt = 0;
+    pthread_mutex_lock(&clients_mutex);
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        if (client_sockets[i] != 0 && active_keys[i][0] != 0 && snap_cnt < MAX_CLIENTS) {
+            strncpy(snap_keys[snap_cnt], active_keys[i], MAX_KEY_LEN - 1);
+            snap_keys[snap_cnt][MAX_KEY_LEN - 1] = '\0';
+            snap_cnt++;
+        }
+    }
+    pthread_mutex_unlock(&clients_mutex);
+
+    // 3. 잔액 조회 — 탈출자는 제외 (GDD §F: 스코어보드는 남은 플레이어 전용)
+    //    클라 disconnect 처리 전이라 active_keys에 탈출자가 잔존할 수 있는 race
+    //    window를 명시적으로 차단.
+    ScoreRemaining rank[MAX_CLIENTS];
+    int rank_cnt = 0;
+    for (int i = 0; i < snap_cnt; i++) {
+        int is_escaped = 0;
+        for (int j = 0; j < escaped_snap_cnt; j++) {
+            if (strncmp(snap_keys[i], escaped_snap[j].key, MAX_KEY_LEN) == 0) {
+                is_escaped = 1;
+                break;
+            }
+        }
+        if (is_escaped) continue;
+
+        UserRecord rec;
+        off_t offset;
+        if (userdb_find(snap_keys[i], &rec, &offset) == 0 && !userdb_is_burned(&rec)) {
+            strncpy(rank[rank_cnt].key, snap_keys[i], MAX_KEY_LEN - 1);
+            rank[rank_cnt].key[MAX_KEY_LEN - 1] = '\0';
+            rank[rank_cnt].money = rec.money;
+            rank_cnt++;
+        }
+    }
+
+    // 4. 잔액 내림차순 정렬 (selection sort — N≤10이라 충분)
+    for (int i = 0; i + 1 < rank_cnt; i++) {
+        int max_idx = i;
+        for (int j = i + 1; j < rank_cnt; j++) {
+            if (rank[j].money > rank[max_idx].money) max_idx = j;
+        }
+        if (max_idx != i) {
+            ScoreRemaining t = rank[i]; rank[i] = rank[max_idx]; rank[max_idx] = t;
+        }
+    }
+
+    // 5. 스코어보드 패킷 작성
+    Packet sb;
+    memset(&sb, 0, sizeof(Packet));
+    sb.type = PKT_EVT_SCOREBOARD;
+    sb.body.scoreboard.countdown_sec = ROUND_END_COUNTDOWN_SEC;
+
+    sb.body.scoreboard.escaped_count = escaped_snap_cnt;
+    for (int i = 0; i < escaped_snap_cnt; i++) {
+        sb.body.scoreboard.escaped[i] = escaped_snap[i];
+    }
+
+    int r_cnt = rank_cnt < MAX_SCORE_REMAINING ? rank_cnt : MAX_SCORE_REMAINING;
+    sb.body.scoreboard.remaining_count = r_cnt;
+    for (int i = 0; i < r_cnt; i++) {
+        sb.body.scoreboard.remaining[i] = rank[i];
+    }
+
+    broadcast_packet(&sb);
+
+    // 5. 안내 채팅
+    Packet hint;
+    memset(&hint, 0, sizeof(Packet));
+    hint.type = PKT_EVT_CHAT;
+    strncpy(hint.body.chat_evt.sender_key, "[ALERT]", MAX_KEY_LEN - 1);
+    strncpy(hint.body.chat_evt.text, announce_text, MAX_TEXT_LEN - 1);
+    broadcast_packet(&hint);
+
+    // 6. 60초 타이머 파생
+    pthread_t tid;
+    if (pthread_create(&tid, NULL, round_end_timer_thread, NULL) == 0) {
+        pthread_detach(tid);
+    } else {
+        pthread_mutex_lock(&g_round_mutex);
+        g_round_end_active = 0;
+        pthread_mutex_unlock(&g_round_mutex);
+    }
+
+    printf("[Server] Round End Countdown fired: %d escaped, %d remaining\n", escaped_snap_cnt, r_cnt);
 }
 
 // 패킷 방송
@@ -97,238 +502,8 @@ static void send_error(int sock, int32_t code, const char *reason) {
     packet_send(sock, &res);
 }
 
-// doc_id 오름차순 정렬 (락 순서 규약 — Circular Wait 봉쇄)
-static int cmp_int32(const void *a, const void *b) {
-    int32_t x = *(const int32_t *)a, y = *(const int32_t *)b;
-    return (x > y) - (x < y);
-}
 
-// =============================================================
-// 이벤트 스레드 — 비동기 매물/NPC 스폰 엔진
-// =============================================================
 
-// 타이밍 상수 (조정 가능)
-#define EVT_TICK_SEC       10   // 기본 틱 간격 (초)
-#define EVT_MARKET_EVERY    2   // 매물 스폰 주기 (틱 수) → 20초
-#define EVT_NPC_EVERY       5   // NPC 시퀀스 주기 (틱 수) → 50초
-#define EVT_NPC_HINT_DELAY  8   // 힌트 후 NPC 실제 등장까지 지연 (초)
-#define EVT_NPC_MAX_AGE_SEC 180 // 미해결 NPC 만료 수명 (초) → 보드 고착 방지
-
-// doc_id / npc_id 발급 카운터 (이벤트 스레드 단독 사용)
-static int32_t g_doc_id_counter = 0;
-static int32_t g_npc_id_counter = 0;
-
-// 태그 테이블 (protocol.h Tag enum 순서와 동기화)
-static const uint32_t TAG_LIST[10] = {
-    TAG_CORP_A, TAG_CORP_B, TAG_CORP_C,
-    TAG_CUSTOMER, TAG_FINANCE, TAG_MILITARY,
-    TAG_GOVERNMENT, TAG_MEDICAL, TAG_RESEARCH, TAG_PERSONAL
-};
-#define TAG_COUNT 10
-
-static const char *TAG_SHORT[10] = {
-    "A기업", "B기업", "C기업",
-    "고객정보", "금융", "군사무기",
-    "정부기관", "의료", "연구개발", "사적정보"
-};
-
-static const char *DOC_SUFFIX[] = {
-    "내부 문건", "비밀 도면", "녹취록",
-    "거래 장부", "고객 명단", "보고서",
-};
-#define DOC_SUFFIX_COUNT 6
-
-// NPC 등장 전 힌트 (TAG_LIST 인덱스와 1:1 대응)
-static const char *NPC_HINT[10] = {
-    "[속보] A기업 내부 비리 의혹 문건 유출설",
-    "[속보] B기업 주가 폭락 — 내부 문건 해커 손에",
-    "[속보] C기업 CEO 비자금 거래 포착",
-    "[속보] 대규모 고객정보 유출 사태 확산",
-    "[속보] 금융 당국, 불법 거래 내역 추적 중",
-    "[속보] 국방부 신무기 도면 유출 의혹 제기",
-    "[속보] 정부 기관 내부 문건 암시장 유통 확인",
-    "[속보] 제약사 미공개 임상 데이터 거래 포착",
-    "[속보] 국책 연구소 기밀 자료 외부 유출",
-    "[속보] 유명인 사생활 영상·정보 거래 포착",
-};
-
-// 비트 수 카운트 (portable)
-static int count_bits(uint32_t v) {
-    int n = 0;
-    while (v) { n += (int)(v & 1u); v >>= 1; }
-    return n;
-}
-
-// 동결 태그 제외한 랜덤 태그 조합 (1~3개) 생성
-// Fisher-Yates partial shuffle로 중복 없이 선택
-static uint32_t event_random_tags(void) {
-    uint32_t frozen = market_frozen_mask();
-
-    uint32_t avail[TAG_COUNT];
-    int avail_cnt = 0;
-    for (int i = 0; i < TAG_COUNT; i++) {
-        if (!(TAG_LIST[i] & frozen))
-            avail[avail_cnt++] = TAG_LIST[i];
-    }
-    if (avail_cnt == 0) return 0;  // 전부 동결 시 스폰 생략 (0 → event_spawn_market이 건너뜀)
-
-    int pick = rand() % 3 + 1;
-    if (pick > avail_cnt) pick = avail_cnt;
-
-    uint32_t pool[TAG_COUNT];
-    for (int i = 0; i < avail_cnt; i++) pool[i] = avail[i];
-    for (int i = 0; i < pick; i++) {
-        int j = i + rand() % (avail_cnt - i);
-        uint32_t tmp = pool[i]; pool[i] = pool[j]; pool[j] = tmp;
-    }
-
-    uint32_t result = 0;
-    for (int i = 0; i < pick; i++) result |= pool[i];
-    return result;
-}
-
-// 태그 비트마스크에서 가장 낮은 비트의 TAG_LIST 인덱스 반환
-static int first_tag_index(uint32_t tags) {
-    for (int i = 0; i < TAG_COUNT; i++) {
-        if (tags & TAG_LIST[i]) return i;
-    }
-    return 0;
-}
-
-// 태그 조합으로 문서명 생성
-static void make_doc_name(uint32_t tags, char *out, size_t sz) {
-    snprintf(out, sz, "%s %s",
-             TAG_SHORT[first_tag_index(tags)],
-             DOC_SUFFIX[rand() % DOC_SUFFIX_COUNT]);
-}
-
-// ── 매물 스폰 루틴 ─────────────────────────────────────────────
-static void event_spawn_market(void) {
-    if (market_is_full()) return;
-
-    uint32_t tags = event_random_tags();
-    if (!tags) return;
-
-    DocFile doc;
-    memset(&doc, 0, sizeof(DocFile));
-    doc.doc_id     = ++g_doc_id_counter;
-    doc.tags       = tags;
-    doc.base_price = (rand() % 8 + 1) * 100;   // 100~800원
-    make_doc_name(tags, doc.name, sizeof(doc.name));
-
-    // 물리 파일 생성 먼저, 실패 시 인메모리 등록하지 않음
-    if (master_write_doc(&doc) != 0) {
-        fprintf(stderr, "[Event] master_write_doc 실패: doc_id=%d\n", doc.doc_id);
-        return;
-    }
-    // 인메모리 등록 실패 시 물리 파일 정리
-    if (market_add(doc.doc_id, doc.tags, doc.base_price, doc.name) != 0) {
-        master_remove_doc(doc.doc_id);
-        return;
-    }
-
-    Packet pkt;
-    memset(&pkt, 0, sizeof(Packet));
-    pkt.type                      = PKT_EVT_MARKET_SPAWN;
-    pkt.body.market_spawn.doc_id     = doc.doc_id;
-    pkt.body.market_spawn.tags       = doc.tags;
-    pkt.body.market_spawn.base_price = doc.base_price;
-    strncpy(pkt.body.market_spawn.name, doc.name, MAX_NAME_LEN - 1);
-    broadcast_packet(&pkt);
-
-    printf("[Event] 매물 스폰: ID=%d tags=0x%03X price=%d \"%s\"\n",
-           doc.doc_id, doc.tags, doc.base_price, doc.name);
-}
-
-// ── NPC 힌트 → 유예 → 스폰 시퀀스 ─────────────────────────────
-static void event_do_npc_sequence(void) {
-    if (npc_is_full()) {
-        printf("[Event] NPC 보드 가득참 — 스폰 건너뜀\n");
-        return;
-    }
-
-    uint32_t req_tags = event_random_tags();
-    if (!req_tags) return;
-
-    // 1단계: 속보 힌트 브로드캐스트 (유저 선점 매집 유도)
-    Packet hint;
-    memset(&hint, 0, sizeof(Packet));
-    hint.type = PKT_EVT_CHAT;
-    strncpy(hint.body.chat_evt.sender_key, "[속보]", MAX_KEY_LEN - 1);
-    strncpy(hint.body.chat_evt.text,
-            NPC_HINT[first_tag_index(req_tags)], MAX_TEXT_LEN - 1);
-    broadcast_packet(&hint);
-
-    // 2단계: 유저가 힌트를 읽고 매집할 시간
-    sleep(EVT_NPC_HINT_DELAY);
-
-    // 3단계: NPC 스폰
-    int32_t npc_id = ++g_npc_id_counter;
-    // 현상금: 태그 수 비례 + 랜덤 (태그 1개 → 500~3000, 3개 → 2000~4000)
-    int32_t bounty = (rand() % 5 + count_bits(req_tags)) * 500;
-
-    if (npc_add(npc_id, req_tags, bounty) != 0) {
-        printf("[Event] NPC 보드 가득참 — 스폰 건너뜀\n");
-        return;
-    }
-
-    Packet pkt;
-    memset(&pkt, 0, sizeof(Packet));
-    pkt.type                       = PKT_EVT_NPC_SPAWN;
-    pkt.body.npc_spawn.npc_id        = npc_id;
-    pkt.body.npc_spawn.required_tags = req_tags;
-    pkt.body.npc_spawn.bounty        = bounty;
-    broadcast_packet(&pkt);
-
-    printf("[Event] NPC 스폰: ID=%d req_tags=0x%03X bounty=%d\n",
-           npc_id, req_tags, bounty);
-}
-
-// ── 의뢰 에이징 — 오래 미해결 NPC 만료 (GDD 2.B) ──────────────
-static void event_age_npcs(void) {
-    int32_t expired[MAX_NPC_SLOTS];
-    int n = 0;
-    npc_despawn_aged(EVT_NPC_MAX_AGE_SEC, expired, MAX_NPC_SLOTS, &n);
-
-    for (int i = 0; i < n; i++) {
-        Packet pkt;
-        memset(&pkt, 0, sizeof(Packet));
-        pkt.type = PKT_EVT_NPC_DESPAWN;
-        pkt.body.npc_despawn.npc_id = expired[i];
-        broadcast_packet(&pkt);
-        printf("[Event] NPC 만료(에이징): ID=%d\n", expired[i]);
-    }
-}
-
-void* event_thread(void* arg) {
-    (void)arg;
-    srand(time(NULL));
-    
-    printf("[Event Engine] 비동기 이벤트 스레드 구동 시작.\n");
-    int tick = 0;
-    
-    while (1) {
-        sleep(EVT_TICK_SEC);
-        tick++;
-        
-        // 1. NPC 의뢰 에이징 체크 (매 틱마다)
-        event_age_npcs();
-        
-        // 2. 시장 매물 스폰
-        if (tick % EVT_MARKET_EVERY == 0) {
-            event_spawn_market();
-        }
-        
-        // 3. NPC 의뢰 스폰 시퀀스 (별도 유예 지연 때문에 스레드 파생)
-        if (tick % EVT_NPC_EVERY == 0) {
-            pthread_t npc_tid;
-            if (pthread_create(&npc_tid, NULL, (void*(*)(void*))event_do_npc_sequence, NULL) == 0) {
-                pthread_detach(npc_tid);
-            }
-        }
-    }
-    return NULL;
-}
 
 // ============================================================
 // 핸들러: /buy
@@ -420,9 +595,10 @@ static void handle_sell(int sock, const char *key, Packet *pkt) {
     }
 
     // 락 순서 규약 — doc_id 오름차순 정렬로 Circular Wait 원천 차단
+    // (GDD §3.A / Task.md B-[핵심] 평가 어필 함수)
     int32_t doc_ids[MAX_INVEN_SIZE];
     memcpy(doc_ids, pkt->body.sell.doc_ids, count * sizeof(int32_t));
-    qsort(doc_ids, count, sizeof(int32_t), cmp_int32);
+    market_doc_lock_many(doc_ids, count);
 
     // 1. NPC 존재 확인
     NPCSlot npc;
@@ -450,9 +626,10 @@ static void handle_sell(int sock, const char *key, Packet *pkt) {
         tag_union |= df.tags;
     }
 
-    // 3. 태그 조합 100% 일치 검증
-    if (tag_union != npc.required_tags) {
-        send_error(sock, ERR_TAG_MISMATCH, "태그 조합이 요구 사항과 일치하지 않습니다.");
+    // 3. 부분집합 검증 (GDD §A): NPC 요구 태그 ⊆ 제출 태그 합집합
+    //    초과 태그가 있어도 통과하되, 5단계에서 해당 문서까지 함께 소모됨
+    if ((tag_union & npc.required_tags) != npc.required_tags) {
+        send_error(sock, ERR_TAG_MISMATCH, "태그 조합이 요구 사항을 충족하지 않습니다.");
         return;
     }
 
@@ -493,7 +670,10 @@ static void handle_sell(int sock, const char *key, Packet *pkt) {
 }
 
 // ============================================================
-// 핸들러: /payoff (3주차 수동 채무 상환 및 경찰 습격 리셋 트리거)
+// 핸들러: /payoff — 수동 채무 상환 및 누적 3명 시 경찰 습격 트리거
+// ----------------------------------------------------------------
+// 락 순서 규약: g_round_mutex 안에서만 라운드 상태 R/W. broadcast 등
+// 외부 I/O는 락 해제 후 수행하여 보유 시간 최소화.
 // ============================================================
 static void handle_payoff(int sock, const char *key) {
     UserRecord rec;
@@ -503,100 +683,195 @@ static void handle_payoff(int sock, const char *key) {
         return;
     }
 
+    int32_t prev_goal, next_goal;
+    int     escaped_now;
+    int     should_trigger_raid = 0;
+
+    pthread_mutex_lock(&g_round_mutex);
+
     if (rec.money < g_goal_money) {
+        int32_t goal_snapshot = g_goal_money;
+        pthread_mutex_unlock(&g_round_mutex);
         char err_msg[MAX_TEXT_LEN];
         snprintf(err_msg, sizeof(err_msg), "상환금 부족: 목표 청산액은 $%d 이나, 당신은 $%d 보유하고 있습니다.",
-                 g_goal_money, rec.money);
+                 goal_snapshot, rec.money);
         send_error(sock, ERR_NOT_ENOUGH_MONEY, err_msg);
         return;
     }
 
-    // 빚 청산 성공! 자금 몰수 후 DB 업데이트
-    rec.money = 0;
-    userdb_update_at(offset, &rec);
+    prev_goal = g_goal_money;
+    next_goal = prev_goal + DEBT_RAISE_STEP;
+    if (next_goal > DEBT_CAP) next_goal = DEBT_CAP;
+    g_goal_money = next_goal;
+
+    // 상한선 최초 도달 시각 기록 (event_thread가 +5분 후 라운드 리셋 발사)
+    if (next_goal == DEBT_CAP && g_cap_reached_at == 0) {
+        g_cap_reached_at = time(NULL);
+    }
 
     g_escaped_count++;
+    escaped_now = g_escaped_count;
 
-    // 1. 본인에게 승리 탈출 전송 (PKT_EVT_VICTORY)
+    // GDD §F 탈출 로그 기록 (최대 3명)
+    if (escaped_now <= MAX_SCORE_ESCAPED) {
+        int idx = escaped_now - 1;
+        strncpy(g_escape_log[idx].key, key, MAX_KEY_LEN - 1);
+        g_escape_log[idx].key[MAX_KEY_LEN - 1] = '\0';
+        g_escape_log[idx].money_at_escape = prev_goal;   // 청산 직전 잔액 = 도달했던 목표액
+        g_escape_log[idx].escape_order    = escaped_now;
+    }
+
+    if (escaped_now >= 3) {
+        should_trigger_raid = 1;   // 실제 중복 발사 가드는 fire_round_end_countdown 내부에서 처리
+    }
+
+    pthread_mutex_unlock(&g_round_mutex);
+
+    // 탈출 완료 → 계정을 다음 판을 위해 초기화 (userdb/sandbox 자체 락 — 라운드 락 밖).
+    // 인벤토리 전량 파기 + 잔고 초기자본 복원 → 같은 키로 재접속 시 깨끗한 새 게임으로 시작.
+    sandbox_purge_user(key);
+    rec.money = INITIAL_MONEY;
+    userdb_update_at(offset, &rec);
+
+    // 1. 본인에게 승리 탈출 전송
     Packet victory;
     memset(&victory, 0, sizeof(Packet));
     victory.type = PKT_EVT_VICTORY;
     snprintf(victory.body.endgame.message, MAX_TEXT_LEN,
-             "축하합니다! $%d의 채무를 성공적으로 청산하고 다크웹을 탈출하셨습니다.", g_goal_money);
+             "축하합니다! $%d의 채무를 성공적으로 청산하고 다크웹을 탈출하셨습니다.", prev_goal);
     packet_send(sock, &victory);
 
-    // 2. 다른 모든 유저들에게 브로드캐스트 안내
+    // 2. 전역 안내 브로드캐스트
     Packet evt;
     memset(&evt, 0, sizeof(Packet));
     evt.type = PKT_EVT_CHAT;
     strncpy(evt.body.chat_evt.sender_key, "[SYSTEM]", MAX_KEY_LEN - 1);
-    snprintf(evt.body.chat_evt.text, MAX_TEXT_LEN - 1,
-             "해커 '%s'님이 $%d의 빚을 갚고 탈출했습니다! 은행 보안 강화로 다음 목표 상환액이 $%d로 인상됩니다.",
-             key, g_goal_money, g_goal_money + 5000);
+    if (next_goal == prev_goal) {
+        snprintf(evt.body.chat_evt.text, MAX_TEXT_LEN - 1,
+                 "해커 '%s'님이 $%d의 빚을 갚고 탈출했습니다! 목표 상환액은 상한선 $%d에 고정됩니다.",
+                 key, prev_goal, DEBT_CAP);
+    } else {
+        snprintf(evt.body.chat_evt.text, MAX_TEXT_LEN - 1,
+                 "해커 '%s'님이 $%d의 빚을 갚고 탈출했습니다! 은행 보안 강화로 다음 목표 상환액이 $%d로 인상됩니다.",
+                 key, prev_goal, next_goal);
+    }
     broadcast_packet(&evt);
 
-    // 3. 목표 상환액 인상
-    g_goal_money += 5000;
-
     printf("[Server] User '%s' paid off! Escaped count: %d, New Goal: %d\n",
-           key, g_escaped_count, g_goal_money);
+           key, escaped_now, next_goal);
 
-    // 4. 누적 3명 도달 시 경찰 습격 리셋 트리거 발송
-    if (g_escaped_count >= 3) {
-        Packet raid;
-        memset(&raid, 0, sizeof(Packet));
-        raid.type = PKT_EVT_POLICE_RAID;
-        strncpy(raid.body.police_raid.passcode, "PURGE", MAX_KEY_LEN - 1);
-        raid.body.police_raid.time_limit_sec = 60;
-        broadcast_packet(&raid);
-
-        Packet hint;
-        memset(&hint, 0, sizeof(Packet));
-        hint.type = PKT_EVT_CHAT;
-        strncpy(hint.body.chat_evt.sender_key, "[ALERT]", MAX_KEY_LEN - 1);
-        strncpy(hint.body.chat_evt.text,
-                "누적 3명 탈출로 경찰 급습이 시작되었습니다! 60초 뒤 샌드박스가 수색 및 자산 소각 처리됩니다. 우회 암호 'PURGE'를 입력하여 대응하십시오!",
-                MAX_TEXT_LEN - 1);
-        broadcast_packet(&hint);
-
-        // 60초 타이머 스레드 구동
-        pthread_t tid;
-        if (pthread_create(&tid, NULL, raid_timer_thread, NULL) == 0) {
-            pthread_detach(tid);
-        }
+    // 3. 누적 3명 탈출 시 라운드 종료 카운트다운 (락 안에서 should_trigger_raid 결정됨)
+    if (should_trigger_raid) {
+        fire_round_end_countdown(
+            "누적 3명 탈출로 라운드가 종료됩니다! "
+            "60초 뒤 라운드가 강제 리셋됩니다. 마지막 에필로그를 나누십시오.");
     }
+}
+
+// ============================================================
+// 핸들러: /fake rich (디버그/시연) — 잔액을 목표 상환액까지 채워 즉시 /payoff 가능하게 함
+// ============================================================
+static void handle_fake_rich(int sock, const char *key) {
+    UserRecord rec;
+    off_t offset;
+    if (userdb_find(key, &rec, &offset) != 0) {
+        send_error(sock, ERR_INVALID_SESSION, "유저 정보 조회 실패");
+        return;
+    }
+
+    pthread_mutex_lock(&g_round_mutex);
+    int32_t goal = g_goal_money;
+    pthread_mutex_unlock(&g_round_mutex);
+
+    rec.money = goal;                 // 목표액만큼 채움 → 즉시 /payoff 가능
+    userdb_update_at(offset, &rec);
+
+    // 잔액/인벤 갱신 응답 (클라가 INVEN_INFO로 잔고 표시를 갱신)
+    Packet res;
+    memset(&res, 0, sizeof(Packet));
+    res.type = PKT_RES_INVEN_INFO;
+    res.body.inven_info.count = sandbox_list(key, res.body.inven_info.items, MAX_INVEN_SIZE);
+    for (int i = 0; i < res.body.inven_info.count; i++) {
+        res.body.inven_info.items[i].is_frozen =
+            is_tag_frozen(res.body.inven_info.items[i].tags);
+    }
+    res.body.inven_info.money = rec.money;
+    packet_send(sock, &res);
+
+    // 본인에게 안내 채팅
+    Packet note;
+    memset(&note, 0, sizeof(Packet));
+    note.type = PKT_EVT_CHAT;
+    strncpy(note.body.chat_evt.sender_key, "[DEBUG]", MAX_KEY_LEN - 1);
+    snprintf(note.body.chat_evt.text, MAX_TEXT_LEN - 1,
+             "잔액을 $%d로 채웠습니다. /payoff 로 탈출을 테스트하세요.", rec.money);
+    packet_send(sock, &note);
+
+    printf("[Debug] fake rich: '%s' money set to %d\n", key, rec.money);
+}
+
+// ============================================================
+// 핸들러: /fake endround (디버그/시연) — 라운드 종료 카운트다운 즉시 발사
+// ============================================================
+static void handle_fake_endround(void) {
+    // 중복 발사 가드는 fire_round_end_countdown 내부에서 처리 (이미 진행 중이면 무시됨)
+    fire_round_end_countdown(
+        "(DEBUG) 강제 라운드 종료가 발동되었습니다! 60초 뒤 라운드가 리셋됩니다.");
+    printf("[Debug] fake endround requested\n");
 }
 
 // ============================================================
 // 핸들러: /minigame_submit (경찰 습격 방탈출 제출)
 // ============================================================
 static void handle_minigame_submit(int sock, const char *key, Packet *pkt) {
-    if (!g_raid_active) {
-        send_error(sock, ERR_INVALID_SESSION, "현재 활성화된 경찰 습격이 없습니다.");
+    // ── §D 주기 경찰 레이드 우선 처리 (개별 응답) ──────────────
+    char current_passcode[MAX_TEXT_LEN];
+    current_passcode[0] = '\0';
+    pthread_mutex_lock(&g_periodic_raid_mutex);
+    int periodic_active = (g_periodic_raid_deadline != 0
+                           && time(NULL) < g_periodic_raid_deadline);
+    int pending_idx = -1;
+    if (periodic_active) {
+        strncpy(current_passcode, g_periodic_raid_passcode, MAX_TEXT_LEN - 1);
+        current_passcode[MAX_TEXT_LEN - 1] = '\0';
+        for (int i = 0; i < MAX_CLIENTS; i++) {
+            if (g_periodic_raid_pending_keys[i][0] != 0 &&
+                strncmp(g_periodic_raid_pending_keys[i], key, MAX_KEY_LEN) == 0) {
+                pending_idx = i;
+                break;
+            }
+        }
+    }
+    pthread_mutex_unlock(&g_periodic_raid_mutex);
+
+    if (periodic_active && pending_idx >= 0) {
+        if (strcmp(pkt->body.minigame.passcode, current_passcode) == 0) {
+            pthread_mutex_lock(&g_periodic_raid_mutex);
+            g_periodic_raid_pending_keys[pending_idx][0] = 0;
+            pthread_mutex_unlock(&g_periodic_raid_mutex);
+
+            Packet res;
+            memset(&res, 0, sizeof(Packet));
+            res.type = PKT_RES_MINIGAME_OK;
+            packet_send(sock, &res);
+
+            printf("[Server] User '%s' resolved periodic raid (passcode '%s' OK)\n",
+                   key, current_passcode);
+        } else {
+            // 오답 → 해당 유저만 즉시 영구 소각 (GDD §D)
+            pthread_mutex_lock(&g_periodic_raid_mutex);
+            g_periodic_raid_pending_keys[pending_idx][0] = 0;
+            pthread_mutex_unlock(&g_periodic_raid_mutex);
+
+            burn_user_by_key(key);
+            // burn_user_by_key가 PKT_EVT_GAME_OVER 단일 전송. 클라가 종료하면 client_handler가 자연 정리.
+        }
         return;
     }
 
-    if (strcmp(pkt->body.minigame.passcode, "PURGE") == 0) {
-        // 타이머 조기 해제 및 전체 복구!
-        g_raid_active = 0;
-
-        Packet res;
-        memset(&res, 0, sizeof(Packet));
-        res.type = PKT_RES_MINIGAME_OK;
-        broadcast_packet(&res);
-
-        Packet evt;
-        memset(&evt, 0, sizeof(Packet));
-        evt.type = PKT_EVT_CHAT;
-        strncpy(evt.body.chat_evt.sender_key, "[SYSTEM]", MAX_KEY_LEN - 1);
-        snprintf(evt.body.chat_evt.text, MAX_TEXT_LEN - 1,
-                 "해커 '%s'님이 우회 암호를 입력하여 경찰 급습을 무력화시켰습니다! 모든 자산이 안전하게 보존되었습니다.", key);
-        broadcast_packet(&evt);
-
-        printf("[Server] User '%s' successfully resolved Police Raid minigame!\n", key);
-    } else {
-        send_error(sock, ERR_INVALID_SESSION, "우회 암호가 일치하지 않습니다.");
-    }
+    // §D 외에는 미니게임 입력이 의미 없음. §F 라운드 종료 카운트다운에는
+    // PURGE 우회 경로가 존재하지 않으므로(미니게임 = §D 전용) 단순 거절.
+    send_error(sock, ERR_INVALID_SESSION, "현재 활성화된 미니게임이 없습니다.");
 }
 
 // ============================================================
@@ -647,41 +922,72 @@ static void handle_inventory(int sock, const char *key) {
 }
 
 // ============================================================
-// 핸들러: /rumor — 수수료 차감 후 Role A에게 글리치 브로드캐스트 위임
+// 핸들러: /rumor — 서버 공유 쿨다운 + 수수료 차감 + 타겟 글리치 단일 전송
+// 락 순서: g_rumor_mutex → g_userdb_mutex (userdb_find/update 내부)
 // ============================================================
 static void handle_rumor(int sock, const char *key, Packet *pkt) {
+    char target_key[MAX_KEY_LEN];
+    strncpy(target_key, pkt->body.rumor.target_key, MAX_KEY_LEN - 1);
+    target_key[MAX_KEY_LEN - 1] = '\0';
+
+    pthread_mutex_lock(&g_rumor_mutex);
+
+    time_t now = time(NULL);
+    if (now < g_rumor_cd_until) {
+        int remain = (int)(g_rumor_cd_until - now);
+        pthread_mutex_unlock(&g_rumor_mutex);
+        char msg[MAX_TEXT_LEN];
+        snprintf(msg, sizeof(msg),
+                 "사보타주 쿨다운 중입니다. %d초 후 다시 시도하십시오.", remain);
+        send_error(sock, ERR_RUMOR_COOLDOWN, msg);
+        return;
+    }
+
     UserRecord rec;
     off_t offset;
     if (userdb_find(key, &rec, &offset) != 0) {
+        pthread_mutex_unlock(&g_rumor_mutex);
         send_error(sock, ERR_INVALID_SESSION, "유저 정보 조회 실패");
         return;
     }
     if (rec.money < RUMOR_FEE) {
+        pthread_mutex_unlock(&g_rumor_mutex);
         send_error(sock, ERR_NOT_ENOUGH_MONEY, "사보타주 수수료가 부족합니다.");
         return;
     }
 
     rec.money -= RUMOR_FEE;
     userdb_update_at(offset, &rec);
+    g_rumor_cd_until = now + RUMOR_COOLDOWN_SEC;
 
-    // 타겟에게 글리치 패킷 단일 전송 (Role A 영역이지만 호출은 여기서)
+    pthread_mutex_unlock(&g_rumor_mutex);
+
+    // 락 밖에서 타겟에게 글리치 패킷 단일 전송 (clients_mutex와 nested 회피)
     Packet glitch;
     memset(&glitch, 0, sizeof(Packet));
     glitch.type = PKT_EVT_RUMOR_GLITCH;
-    unicast_to_key(pkt->body.rumor.target_key, &glitch);
+    unicast_to_key(target_key, &glitch);
 
-    printf("[Server] %s paid %d for /rumor against %s.\n",
-           key, RUMOR_FEE, pkt->body.rumor.target_key);
+    printf("[Server] %s paid %d for /rumor against %s (cooldown %ds).\n",
+           key, RUMOR_FEE, target_key, RUMOR_COOLDOWN_SEC);
 }
 
 // ============================================================
-// 파산 처리: 자금이 0 이하가 되면 계정 소각 + 강제 퇴출
+// 파산 처리: GDD §F — 자금(money)==0 AND 인벤토리==비어있음 일 때만 발동
+// (자금 0이라도 매각 가능한 문서가 남아 있으면 파산으로 보지 않음)
 // ============================================================
 static int check_bankruptcy(int sock, const char *key) {
     UserRecord rec;
     off_t offset;
     if (userdb_find(key, &rec, &offset) != 0) return 0;
     if (rec.money > 0) return 0;
+
+    // 인벤토리에 매각 가능한 문서가 남아 있으면 파산 아님 (GDD §F)
+    int inv = sandbox_count(key);
+    if (inv > 0) return 0;
+    // opendir 실패(inv<0)는 안전하게 파산 보류로 간주
+
+    if (inv < 0) return 0;
 
     userdb_burn_at(offset);
 
@@ -768,12 +1074,16 @@ void* client_handler(void* arg) {
             // 개인 샌드박스 생성
             sandbox_user_init(my_key);
 
+            pthread_mutex_lock(&g_round_mutex);
+            int32_t goal_snapshot = g_goal_money;
+            pthread_mutex_unlock(&g_round_mutex);
+
             Packet res;
             memset(&res, 0, sizeof(Packet));
             res.type = PKT_RES_LOGIN_OK;
             res.body.login_ok.assigned_session_id = sock;
             res.body.login_ok.money = rec.money;
-            res.body.login_ok.goal_money = g_goal_money;
+            res.body.login_ok.goal_money = goal_snapshot;
             packet_send(sock, &res);
 
             // 늦은 접속자 동기화: 현재 시장 매물과 NPC 의뢰를 이 클라이언트에만 유니캐스트.
@@ -804,6 +1114,21 @@ void* client_handler(void* arg) {
                     sync.body.npc_spawn.bounty        = npc_orders[i].bounty;
                     packet_send(sock, &sync);
                 }
+
+                // 현재 동결 상태 동기화: 진행 중인 공중파 유출이 있으면 늦은 접속자도
+                // 즉시 FRZ를 보도록 NEWS_LEAK(현재 mask)을 단일 전송한다.
+                // (위 MARKET_SPAWN/NPC_SPAWN 다음에 보내야 클라가 재마킹할 수 있음)
+                uint32_t cur_frozen = market_frozen_mask();
+                if (cur_frozen != 0) {
+                    Packet fz;
+                    memset(&fz, 0, sizeof(Packet));
+                    fz.type = PKT_EVT_NEWS_LEAK;
+                    fz.body.news_leak.frozen_tags  = cur_frozen;
+                    fz.body.news_leak.duration_sec = 0;
+                    strncpy(fz.body.news_leak.headline,
+                            "현재 동결 상태 동기화 (진행 중인 공중파 유출)", MAX_TEXT_LEN - 1);
+                    packet_send(sock, &fz);
+                }
             }
 
             printf("[Server] User '%s' logged in.\n", my_key);
@@ -833,6 +1158,22 @@ void* client_handler(void* arg) {
             }
             case PKT_REQ_MINIGAME_SUBMIT:
                 handle_minigame_submit(sock, my_key, &pkt);
+                break;
+            case PKT_REQ_TRIGGER_RAID:
+                fire_self_police_raid(sock, my_key);
+                break;
+            case PKT_REQ_TRIGGER_LEAK:
+                // 디버그/시연: 공중파 유출을 즉시 발사 (전체 broadcast — 실제 이벤트와 동일)
+                if (fire_public_leak() == 0) {
+                    send_error(sock, ERR_DOC_NOT_FOUND,
+                               "동결할 매물 태그가 없습니다 (매물이 없거나 이미 전부 동결).");
+                }
+                break;
+            case PKT_REQ_TRIGGER_RICH:
+                handle_fake_rich(sock, my_key);
+                break;
+            case PKT_REQ_TRIGGER_ENDROUND:
+                handle_fake_endround();
                 break;
             case PKT_REQ_BUY:
                 handle_buy(sock, my_key, &pkt);
@@ -883,37 +1224,48 @@ static void seed_market_and_npc(void) {
     struct {
         int32_t  doc_id;
         uint32_t tags;
-        int32_t  price;
         const char *name;
     } docs[] = {
-        { 201, TAG_CORP_B   | TAG_FINANCE,  300, "재무제표 (B기업)" },
-        { 202, TAG_GOVERNMENT | TAG_MILITARY, 500, "기밀도면 (국방부)" },
-        { 203, TAG_PERSONAL | TAG_CUSTOMER, 100, "주민번호 (민간)" },
-        { 204, TAG_CORP_A   | TAG_PERSONAL, 800, "녹취록 (A정치인)" },
+        { 124, TAG_CORP_B   | TAG_FINANCE,    "바이오젠 기밀폐기 재무제표" },
+        { 111, TAG_GOVERNMENT | TAG_MILITARY, "연방정부 전술 드론 설계도" },
+        { 47, TAG_PERSONAL | TAG_CUSTOMER,   "퇴직 요원 신상정보" },
+        { 70, TAG_CORP_A   | TAG_PERSONAL,   "아사사카 임직원 비리 증거" },
     };
     for (size_t i = 0; i < sizeof(docs)/sizeof(docs[0]); i++) {
+        // 레버 A: 시드도 동일 공식 (지터 없이 결정적). 4종 모두 2태그 → $800
+        int32_t price = count_bits(docs[i].tags) * MARKET_PRICE_PER_TAG;
         DocFile df;
         memset(&df, 0, sizeof(df));
         df.doc_id = docs[i].doc_id;
         df.tags = docs[i].tags;
-        df.base_price = docs[i].price;
+        df.base_price = price;
         strncpy(df.name, docs[i].name, MAX_NAME_LEN - 1);
         master_write_doc(&df);
-        market_add(docs[i].doc_id, docs[i].tags, docs[i].price, docs[i].name);
+        market_add(docs[i].doc_id, docs[i].tags, price, docs[i].name);
     }
 
-    // NPC 의뢰 2건
-    npc_add(11, TAG_CORP_B   | TAG_FINANCE,                1200);
-    npc_add(12, TAG_GOVERNMENT | TAG_MILITARY,             4500);
+    // NPC 의뢰 2건 (보상은 런타임 공식 (rand()%5+태그수)*500 범위 내로: 2태그 → $1,000~3,000)
+    npc_add(102, TAG_CORP_B   | TAG_FINANCE,                1200);   // 2태그 저~중
+    npc_add(356, TAG_GOVERNMENT | TAG_MILITARY,             2500);   // 2태그 중~상 (프리미엄 타깃)
 
     printf("[Server] Seeded %zu market docs and 2 NPC bounties.\n",
            sizeof(docs)/sizeof(docs[0]));
+}
+
+// SIGTERM/SIGINT 진입 시 정상 종료 경로(atexit + leak 리포트 트리거).
+static void on_shutdown_signal(int sig) {
+    (void)sig;
+    exit(0);
 }
 
 int main(void) {
     int server_sock, client_sock;
     struct sockaddr_in server_addr, client_addr;
     socklen_t client_addr_size;
+
+    signal(SIGTERM, on_shutdown_signal);
+    signal(SIGINT,  on_shutdown_signal);
+    signal(SIGPIPE, SIG_IGN);   // EPIPE는 send 반환값으로 처리 (MSG_NOSIGNAL과 이중 방어)
 
     memset(client_sockets, 0, sizeof(client_sockets));
     memset(active_keys, 0, sizeof(active_keys));
@@ -935,10 +1287,7 @@ int main(void) {
     seed_market_and_npc();
 
     // 이벤트 스레드 파생 (매물·NPC 자동 스폰 및 에이징)
-    pthread_t event_tid;
-    if (pthread_create(&event_tid, NULL, event_thread, NULL) == 0) {
-        pthread_detach(event_tid);
-    } else {
+    if (events_start_thread() != 0) {
         perror("[Server] 이벤트 스레드 생성 실패");
         exit(1);
     }
@@ -988,14 +1337,20 @@ int main(void) {
         int added = 0;
         for (int i = 0; i < MAX_CLIENTS; i++) {
             if (client_sockets[i] == 0) {
+                int* sock_ptr = malloc(sizeof(int));
+                if (sock_ptr == NULL) break;          // OOM — added=0 유지 → 아래서 거부 처리
+                *sock_ptr = client_sock;
+
+                pthread_t t_id;
+                if (pthread_create(&t_id, NULL, client_handler, sock_ptr) != 0) {
+                    free(sock_ptr);                   // 스레드 생성 실패 — 슬롯 미점유, 메모리 회수
+                    break;                            // added=0 유지 → 소켓 close
+                }
+                pthread_detach(t_id);
+
+                // 핸들러 파생 성공 후에만 슬롯 점유 (실패 시 슬롯/소켓 누수 방지)
                 client_sockets[i] = client_sock;
                 added = 1;
-
-                int* sock_ptr = malloc(sizeof(int));
-                *sock_ptr = client_sock;
-                pthread_t t_id;
-                pthread_create(&t_id, NULL, client_handler, sock_ptr);
-                pthread_detach(t_id);
                 printf("[Server] New client connected. Socket: %d\n", client_sock);
                 break;
             }

@@ -46,4 +46,8 @@ int userdb_burn_at(off_t offset);
 // 소각 마커가 -1에서 다른 값으로 바뀌면 이 함수 안만 고치면 됨.
 int userdb_is_burned(const UserRecord *rec);
 
+// 라운드 리셋: 소각(-1) 마커가 박힌 레코드는 그대로 두고,
+// 그 외 모든 활성 레코드를 (money=initial_money, inventory=비어있음) 으로 복원.
+int userdb_reset_round(int32_t initial_money);
+
 #endif

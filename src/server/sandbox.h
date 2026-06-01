@@ -30,4 +30,12 @@ int  sandbox_list(const char *key, InvenItem *out, int max);             // open
 int  master_write_doc(const DocFile *doc);
 int  master_remove_doc(int32_t doc_id);
 
+// 라운드 리셋: 마스터 폴더와 모든 유저 샌드박스의 doc_*.dat 파일을 일괄 unlink.
+// 디렉토리(./data, master, users/<key>)는 보존하여 다음 라운드에 그대로 재사용.
+int  sandbox_global_reset(void);
+
+// 단일 유저 샌드박스 청소 (GDD §D 미니게임 실패 시 보유 doc 일괄 소각).
+// 디렉토리 자체는 유지하여 같은 KEY로 재가입 시도 시 차단은 userdb 측에서 담당.
+int  sandbox_purge_user(const char *key);
+
 #endif

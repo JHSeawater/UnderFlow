@@ -7,16 +7,18 @@
 // 태그 이름 호출 함수
 const char* get_tag_name(uint32_t tag_bit) {
     switch(tag_bit) {
-        case TAG_CORP_A: return "기업A";
-        case TAG_CORP_B: return "기업B";
-        case TAG_CORP_C: return "기업C";
-        case TAG_CUSTOMER: return "고객정보";
-        case TAG_FINANCE: return "금융";
-        case TAG_MILITARY: return "군사무기";
-        case TAG_GOVERNMENT: return "정부기관";
-        case TAG_MEDICAL: return "의료";
-        case TAG_RESEARCH: return "연구개발";
-        case TAG_PERSONAL: return "사적정보";
+        case TAG_CORP_A: return "아사사카";
+        case TAG_CORP_B: return "바이오젠";
+        case TAG_CORP_C: return "넥서스";
+        case TAG_CUSTOMER: return "유저DB/신상";
+        case TAG_FINANCE: return "크레딧/비자금";
+        case TAG_MILITARY: return "전술AI/무기";
+        case TAG_GOVERNMENT: return "연방기밀";
+        case TAG_MEDICAL: return "인체실험/바이오";
+        case TAG_RESEARCH: return "프로토타입";
+        case TAG_PERSONAL: return "블랙메일/약점";
+        case TAG_CORP_D: return "밀리테크";
+        case TAG_CORP_E: return "레이븐";
         default: return "알수없음";
     }
 }
@@ -91,6 +93,21 @@ static void swap_packet_endian(Packet *pkt) {
         case PKT_EVT_POLICE_RAID:
             pkt->body.police_raid.time_limit_sec = ntohl(pkt->body.police_raid.time_limit_sec);
             break;
+        case PKT_EVT_SCOREBOARD:
+            pkt->body.scoreboard.countdown_sec   = ntohl(pkt->body.scoreboard.countdown_sec);
+            pkt->body.scoreboard.escaped_count   = ntohl(pkt->body.scoreboard.escaped_count);
+            pkt->body.scoreboard.remaining_count = ntohl(pkt->body.scoreboard.remaining_count);
+            for (int i = 0; i < MAX_SCORE_ESCAPED; i++) {
+                pkt->body.scoreboard.escaped[i].money_at_escape =
+                    ntohl(pkt->body.scoreboard.escaped[i].money_at_escape);
+                pkt->body.scoreboard.escaped[i].escape_order =
+                    ntohl(pkt->body.scoreboard.escaped[i].escape_order);
+            }
+            for (int i = 0; i < MAX_SCORE_REMAINING; i++) {
+                pkt->body.scoreboard.remaining[i].money =
+                    ntohl(pkt->body.scoreboard.remaining[i].money);
+            }
+            break;
         default:
             break;
     }
@@ -137,6 +154,14 @@ static void enforce_null_termination(Packet *pkt) {
         case PKT_RES_INVEN_INFO:
             for(int i = 0; i < MAX_INVEN_SIZE; i++) {
                 pkt->body.inven_info.items[i].name[MAX_NAME_LEN - 1] = '\0';
+            }
+            break;
+        case PKT_EVT_SCOREBOARD:
+            for (int i = 0; i < MAX_SCORE_ESCAPED; i++) {
+                pkt->body.scoreboard.escaped[i].key[MAX_KEY_LEN - 1] = '\0';
+            }
+            for (int i = 0; i < MAX_SCORE_REMAINING; i++) {
+                pkt->body.scoreboard.remaining[i].key[MAX_KEY_LEN - 1] = '\0';
             }
             break;
         default:

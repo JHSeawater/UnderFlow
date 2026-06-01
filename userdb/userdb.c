@@ -123,41 +123,45 @@ int userdb_update_at(off_t offset, const UserRecord *rec){
 
 int userdb_burn_at(off_t offset) {
     pthread_mutex_lock(&g_userdb_mutex);
-    
+
     int fd = open(USERDB_PATH, O_RDWR);
     if (fd == -1) {
         pthread_mutex_unlock(&g_userdb_mutex);
         return -1;
     }
-    
+
     if (lseek(fd, offset, SEEK_SET) == -1) {
         close(fd);
         pthread_mutex_unlock(&g_userdb_mutex);
         return -1;
     }
-    
+
     UserRecord rec;
     if (read(fd, &rec, sizeof(UserRecord)) != sizeof(UserRecord)) {
         close(fd);
         pthread_mutex_unlock(&g_userdb_mutex);
         return -1;
     }
-    
-    // 파산처리
+
+    // 영구 소각: money 마커 + 인벤토리 일관성 클리어
+    // (재접속 차단은 money==-1 검사로 작동하지만, 인벤 필드도 0으로 정리해 두면
+    //  혹시 burn 마커 정책이 바뀌어도 잔여 doc_id 참조가 남지 않는다.)
     rec.money = -1;
-    
+    rec.inventory_count = 0;
+    memset(rec.inventory_doc_ids, 0, sizeof(rec.inventory_doc_ids));
+
     if (lseek(fd, offset, SEEK_SET) == -1) {
         close(fd);
         pthread_mutex_unlock(&g_userdb_mutex);
         return -1;
     }
-    
+
     if (write(fd, &rec, sizeof(UserRecord)) != sizeof(UserRecord)) {
         close(fd);
         pthread_mutex_unlock(&g_userdb_mutex);
         return -1;
     }
-    
+
     close(fd);
     pthread_mutex_unlock(&g_userdb_mutex);
     return 0;
@@ -165,6 +169,37 @@ int userdb_burn_at(off_t offset) {
 
 int userdb_is_burned(const UserRecord *rec){
     return rec->money == -1 ? 1 : 0;
+}
+
+int userdb_reset_round(int32_t initial_money) {
+    pthread_mutex_lock(&g_userdb_mutex);
+
+    int fd = open(USERDB_PATH, O_RDWR);
+    if (fd == -1) {
+        pthread_mutex_unlock(&g_userdb_mutex);
+        return -1;
+    }
+
+    UserRecord rec;
+    off_t offset = 0;
+    ssize_t n;
+    while ((n = pread(fd, &rec, sizeof(UserRecord), offset)) == sizeof(UserRecord)) {
+        if (rec.money != -1) {
+            rec.money = initial_money;
+            rec.inventory_count = 0;
+            memset(rec.inventory_doc_ids, 0, sizeof(rec.inventory_doc_ids));
+            if (pwrite(fd, &rec, sizeof(UserRecord), offset) != sizeof(UserRecord)) {
+                close(fd);
+                pthread_mutex_unlock(&g_userdb_mutex);
+                return -1;
+            }
+        }
+        offset += sizeof(UserRecord);
+    }
+
+    close(fd);
+    pthread_mutex_unlock(&g_userdb_mutex);
+    return 0;
 }
 
 

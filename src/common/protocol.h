@@ -3,18 +3,26 @@
 
 #include <stdint.h>
 
-#define MAX_KEY_LEN     32
-#define MAX_TEXT_LEN    256
-#define MAX_NAME_LEN    64
-#define MAX_INVEN_SIZE  5    // GDD 2-C: 인벤토리 최대 한도
+#define MAX_KEY_LEN          32
+#define MAX_TEXT_LEN         256
+#define MAX_NAME_LEN         64
+#define MAX_INVEN_SIZE       7    // GDD 2-C: 인벤토리 최대 한도 (태그 확장에 맞춰 5 ➔ 7 상향)
+
+// GDD §F 스코어보드 정원 (Packet body 388B 내 수용을 위해 remaining=7)
+#define MAX_SCORE_ESCAPED    3
+#define MAX_SCORE_REMAINING  7
+
+// 게임 밸런스 상수 (서버·클라 합의값 — 라운드 리셋 시 동일 값 사용)
+#define INITIAL_MONEY        1000
+#define GOAL_MONEY           10000
 
 // =============================================================
 // 태그 비트마스크 정의 (최대 32개까지 확장 가능)
 // =============================================================
 typedef enum {
-    TAG_CORP_A     = 1U << 0,    // 기업A
-    TAG_CORP_B     = 1U << 1,    // 기업B
-    TAG_CORP_C     = 1U << 2,    // 기업C
+    TAG_CORP_A     = 1U << 0,    // 기업A (아사사카)
+    TAG_CORP_B     = 1U << 1,    // 기업B (바이오젠)
+    TAG_CORP_C     = 1U << 2,    // 기업C (넥서스)
     TAG_CUSTOMER   = 1U << 3,    // 고객정보
     TAG_FINANCE    = 1U << 4,    // 금융
     TAG_MILITARY   = 1U << 5,    // 군사무기
@@ -22,6 +30,8 @@ typedef enum {
     TAG_MEDICAL    = 1U << 7,    // 의료
     TAG_RESEARCH   = 1U << 8,    // 연구개발
     TAG_PERSONAL   = 1U << 9,    // 사적정보
+    TAG_CORP_D     = 1U << 10,   // 기업D (밀리테크)
+    TAG_CORP_E     = 1U << 11,   // 기업E (레이븐)
 } Tag;
 
 // 클라이언트 표시용 태그 라벨 매핑 (안전한 함수 형태)
@@ -57,6 +67,10 @@ typedef enum {
     PKT_REQ_INVEN,
     PKT_REQ_RUMOR,
     PKT_REQ_MINIGAME_SUBMIT,
+    PKT_REQ_TRIGGER_RAID,       // 108 — 디버그/시연: 요청자 자신 대상 §D 레이드 트리거 (body 없음)
+    PKT_REQ_TRIGGER_LEAK,       // 109 — 디버그/시연: 공중파 유출(동결) 즉시 발사 (body 없음)
+    PKT_REQ_TRIGGER_RICH,       // 110 — 디버그/시연: 잔액을 목표 상환액까지 채움 (즉시 /payoff 가능, body 없음)
+    PKT_REQ_TRIGGER_ENDROUND,   // 111 — 디버그/시연: 라운드 종료 카운트다운 즉시 발사 (body 없음)
 
     PKT_RES_LOGIN_OK       = 200,
     PKT_RES_LOGIN_FAIL,
@@ -78,6 +92,7 @@ typedef enum {
     PKT_EVT_POLICE_RAID,
     PKT_EVT_GAME_OVER,
     PKT_EVT_VICTORY,
+    PKT_EVT_SCOREBOARD,         // 311 — GDD §F 라운드 종료 카운트다운
 } PacketType;
 
 // =============================================================
@@ -92,6 +107,19 @@ typedef struct {
     char     name[MAX_NAME_LEN];
     int32_t  is_frozen;
 } InvenItem;
+
+// 스코어보드 — 탈출자 항목 (GDD §F)
+typedef struct {
+    char    key[MAX_KEY_LEN];
+    int32_t money_at_escape;
+    int32_t escape_order;
+} ScoreEscaped;
+
+// 스코어보드 — 남은 유저 항목 (잔액 순위)
+typedef struct {
+    char    key[MAX_KEY_LEN];
+    int32_t money;
+} ScoreRemaining;
 
 // 메인 패킷 구조체
 typedef struct {
@@ -184,6 +212,15 @@ typedef struct {
         } police_raid;
 
         struct { char message[MAX_TEXT_LEN]; } endgame;
+
+        // 라운드 종료 카운트다운 + 스코어보드 (GDD §F)
+        struct {
+            int32_t        countdown_sec;                    // 60
+            int32_t        escaped_count;                    // ≤ MAX_SCORE_ESCAPED
+            ScoreEscaped   escaped[MAX_SCORE_ESCAPED];       // 탈출 로그
+            int32_t        remaining_count;                  // ≤ MAX_SCORE_REMAINING
+            ScoreRemaining remaining[MAX_SCORE_REMAINING];   // 잔액 순위 (내림차순)
+        } scoreboard;
     } body;
 } Packet;
 

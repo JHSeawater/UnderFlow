@@ -139,3 +139,45 @@ int master_remove_doc(int32_t doc_id) {
     master_doc_path(doc_id, path, sizeof(path));
     return unlink(path) == 0 ? 0 : -1;
 }
+
+// 디렉토리 하나의 doc_*.dat을 전부 unlink. 디렉토리 자체는 유지.
+static void purge_docs_in(const char *dir_path) {
+    DIR *d = opendir(dir_path);
+    if (!d) return;
+    struct dirent *ent;
+    while ((ent = readdir(d)) != NULL) {
+        if (strncmp(ent->d_name, "doc_", 4) != 0) continue;
+        char path[1024];
+        snprintf(path, sizeof(path), "%s/%s", dir_path, ent->d_name);
+        unlink(path);
+    }
+    closedir(d);
+}
+
+int sandbox_purge_user(const char *key) {
+    char path[512];
+    user_dir_path(key, path, sizeof(path));
+    purge_docs_in(path);
+    return 0;
+}
+
+int sandbox_global_reset(void) {
+    // 1. 마스터 폴더 청소
+    purge_docs_in(MASTER_DIR);
+
+    // 2. 각 유저 샌드박스 청소 (USERS_DIR 하위 디렉토리 순회)
+    DIR *u = opendir(USERS_DIR);
+    if (!u) return 0;
+    struct dirent *ent;
+    while ((ent = readdir(u)) != NULL) {
+        if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) continue;
+        char user_path[512];
+        snprintf(user_path, sizeof(user_path), "%s/%s", USERS_DIR, ent->d_name);
+        struct stat st;
+        if (stat(user_path, &st) == 0 && S_ISDIR(st.st_mode)) {
+            purge_docs_in(user_path);
+        }
+    }
+    closedir(u);
+    return 0;
+}
