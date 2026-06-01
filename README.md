@@ -25,7 +25,7 @@ sudo apt install build-essential libncursesw5-dev
 ```
 
 ### 실행 의존성 — BGM (선택)
-BGM 재생은 아래 플레이어 중 **하나라도 설치돼 있으면 자동 감지·사용**한다. 우선순위는 `mpg123` → `ffplay`(ffmpeg) → `cvlc`(vlc). **하나도 없으면 무음으로 정상 구동**되며 게임 진행에는 전혀 지장이 없다 (크래시·에러 없음).
+BGM 재생은 아래 플레이어 중 **하나라도 설치돼 있으면 자동 감지·사용**. 우선순위는 `mpg123` → `ffplay`(ffmpeg) → `cvlc`(vlc). **하나도 없으면 무음으로 정상 구동**되며 게임 진행에는 전혀 지장이 없음.
 
 ```bash
 sudo apt install mpg123        # 권장 (가장 가볍고 안정적)
@@ -162,7 +162,7 @@ sudo apt install mpg123        # 권장 (가장 가볍고 안정적)
 
 ---
 
-## 평가 어필 포인트
+## 구현 특징
 
 - **데드락 원천 차단**: 다수 문서 자원 접근 시 ID 오름차순 정렬 강제 (`market_doc_lock_many` — `src/server/market.c`).
 - **EXDEV 회피**: 마스터·샌드박스를 `./data` 하위 단일 파일시스템에 묶어 `rename()` 항상 원자적.
