@@ -5,7 +5,7 @@
 
 // 타이밍 상수
 #define EVT_TICK_SEC           5
-#define EVT_MARKET_EVERY       2
+#define EVT_MARKET_EVERY       1   // 매물 스폰 주기 = 1틱(5s). 보드를 더 빠르게 채워 매칭 매물 확보 용이
 #define EVT_NPC_EVERY          3   // 새 의뢰 스폰 주기 = 3틱(15s). 매칭 의뢰가 더 자주 등장
 #define EVT_NPC_HINT_DELAY     8
 #define EVT_NPC_MAX_AGE_SEC  140   // 1태그 의뢰 수명 (기본). 태그 1개 늘 때마다 STEP만큼 단축
