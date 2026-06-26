@@ -143,9 +143,7 @@ int userdb_burn_at(off_t offset) {
         return -1;
     }
 
-    // 영구 소각: money 마커 + 인벤토리 일관성 클리어
-    // (재접속 차단은 money==-1 검사로 작동하지만, 인벤 필드도 0으로 정리해 두면
-    //  혹시 burn 마커 정책이 바뀌어도 잔여 doc_id 참조가 남지 않는다.)
+    // 영구 소각: money=-1 마커 + 인벤 필드도 0으로 정리
     rec.money = -1;
     rec.inventory_count = 0;
     memset(rec.inventory_doc_ids, 0, sizeof(rec.inventory_doc_ids));

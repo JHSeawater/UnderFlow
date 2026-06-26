@@ -58,9 +58,8 @@ void freeze_tags(uint32_t tags);
 void unfreeze_tags(uint32_t tags);
 int  is_tag_frozen(uint32_t tags);
 
-// [Deadlock 원천 차단] 다수의 문서 ID에 락을 걸기 전, 반드시 ID 오름차순으로
-// 정렬해 순환 대기를 봉쇄하기 위한 규약 함수 (GDD §3.A / Task.md B-[핵심])
-// ids 배열을 in-place로 오름차순 정렬한다. count<=1이면 no-op.
-void market_doc_lock_many(int32_t *ids, int count);
+// 다수 문서 ID를 in-place 오름차순 정렬한다. count<=1이면 no-op.
+// 묶음 매각 시 문서 처리 순서를 결정적으로 고정해 두는 헬퍼.
+void market_doc_sort_ids(int32_t *ids, int count);
 
 #endif

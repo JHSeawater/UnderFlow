@@ -100,8 +100,7 @@ void handle_sigint(int sig)
 }
 
 // GDD §D: SIGQUIT(Ctrl+\)을 안전 탈출 경로로 매핑.
-// 시스템 먹통/렌더 깨짐 등 비상시 터미널을 복구하고 즉시 종료한다.
-// (signal-safe 보장이 어려운 endwin은 호출하지만, ncurses 통상 패턴.)
+// 비상시 터미널 복구 후 즉시 종료. (endwin은 엄밀히 signal-safe는 아니지만 통상 패턴)
 void handle_sigquit(int sig)
 {
     (void)sig;
@@ -674,9 +673,7 @@ int main(int argc, char *argv[]) {
         int ch = wgetch(ui.prompt);
 
         if (ch == ERR) {
-            // 키 입력이 없을 때만 진입. 30ms까지 socket을 대기해 CPU 100% 점유(바쁜 회전)를 막는다.
-            // 키 입력은 다음 wgetch에서 즉시 처리되고(최대 30ms 지연 — 체감 불가),
-            // 패킷 도착 시 select가 즉시 반환되며, 카운트다운/글리치 애니메이션(≥90ms)도 무리 없다.
+            // 키 입력 없을 때 30ms 타임아웃으로 패킷을 대기 (CPU 100% 점유 방지)
             struct timeval tv = {0, 30000};
             fd_set readfds;
             FD_ZERO(&readfds);
@@ -967,6 +964,11 @@ int main(int argc, char *argv[]) {
                         state.inv[i] = pkt.body.inven_info.items[i];
                     }
                     state.my_money = pkt.body.inven_info.money;
+                    if (mode == STATE_NORMAL) render_inventory(&ui, &state);
+                }
+                else if (pkt.type == PKT_EVT_GOAL_UPDATE) {
+                    // 타 유저 탈출로 목표 상환액이 인상됨 → 내 화면 목표액 갱신
+                    state.my_goal = pkt.body.goal_update.goal_money;
                     if (mode == STATE_NORMAL) render_inventory(&ui, &state);
                 }
             }

@@ -265,14 +265,14 @@ int npc_snapshot(NPCSlot *out_array, int max_size, int *out_count) {
     return 0;
 }
 
-// [Deadlock 원천 차단 규약] 여러 문서 자원을 동시에 다루기 전에
-// 반드시 이 함수로 ID 오름차순 정렬을 강제하여 Circular Wait를 봉쇄한다.
+// 묶음 매각 시 제출 문서 ID를 오름차순으로 정렬해 처리 순서를 결정적으로 고정한다.
+// (실제 동시성 안전은 개별 뮤텍스를 중첩 없이 원자적으로 사용하는 구조에서 보장된다.)
 static int cmp_int32_asc(const void *a, const void *b) {
     int32_t x = *(const int32_t *)a, y = *(const int32_t *)b;
     return (x > y) - (x < y);
 }
 
-void market_doc_lock_many(int32_t *ids, int count) {
+void market_doc_sort_ids(int32_t *ids, int count) {
     if (!ids || count <= 1) return;
     qsort(ids, (size_t)count, sizeof(int32_t), cmp_int32_asc);
 }

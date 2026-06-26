@@ -108,6 +108,9 @@ static void swap_packet_endian(Packet *pkt) {
                     ntohl(pkt->body.scoreboard.remaining[i].money);
             }
             break;
+        case PKT_EVT_GOAL_UPDATE:
+            pkt->body.goal_update.goal_money = ntohl(pkt->body.goal_update.goal_money);
+            break;
         default:
             break;
     }
@@ -171,10 +174,10 @@ static void enforce_null_termination(Packet *pkt) {
 
 // 수신 함수
 int packet_recv(int sockfd, Packet *pkt) {
-    // 수신 전 패킷 구조체를 0으로 꽉 채워 쓰레기값 원천 차단
-    memset(pkt, 0, sizeof(Packet)); 
-    
-    // 구조체 크기만큼 정확히 대기해서 읽음
+    // 수신 전 0으로 초기화 (쓰레기값 방지)
+    memset(pkt, 0, sizeof(Packet));
+
+    // 구조체 크기만큼 읽기
     int ret = recv(sockfd, pkt, sizeof(Packet), MSG_WAITALL);
     if (ret <= 0) return ret;
 
@@ -185,7 +188,7 @@ int packet_recv(int sockfd, Packet *pkt) {
     // 바디 엔디안 자동 스왑
     swap_packet_endian(pkt);
 
-    // 문자열 오버플로우 강제 방어
+    // 문자열 널 종단 보정
     enforce_null_termination(pkt);
 
     return ret;
@@ -193,14 +196,14 @@ int packet_recv(int sockfd, Packet *pkt) {
 
 // 송신 함수
 int packet_send(int sockfd, const Packet *pkt) {
-    // 송신 패킷은 원본을 훼손하면 안 되므로 복사본 생성
+    // 원본 훼손 방지용 복사본
     Packet send_pkt;
     memcpy(&send_pkt, pkt, sizeof(Packet));
 
-    // 보낼 때도 오버플로우 방지 및 남는 공간 쓰레기값 제거 (이미 원본이 0 초기화됐길 기대하지만 이중 방어)
+    // 송신 시에도 널 종단 처리
     enforce_null_termination(&send_pkt);
 
-    // 바디 스왑 (htonl이나 ntohl이나 로직은 동일하므로 swap 재활용)
+    // 바디 스왑 (htonl/ntohl 로직 동일하므로 재사용)
     swap_packet_endian(&send_pkt);
     
     // 헤더 스왑

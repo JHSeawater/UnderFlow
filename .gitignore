@@ -80,7 +80,9 @@ dkms.conf
 #  - docs/  : 내부 기획 문서(GDD/Task/Schedule/Worktable/BUGFIX). 제출 문서는 README.md만.
 #  - tests/ : Python 통합 테스트(개발 검증용). .cursorrules "C only" 규정상 제출 제외.
 #  - .cursorrules / CLAUDE.md : AI 보조 규칙 파일.
+#  - Ref README/ : README 작성 참고용 외부 예시. 제출 무관.
 .cursorrules
 CLAUDE.md
 /docs/
 /tests/
+/Ref README/

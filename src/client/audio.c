@@ -23,11 +23,30 @@ static volatile int   g_audio_active = 0;
 static volatile pid_t g_child_pid = -1;   // 현재 재생 중인 디코더 자식 PID (-1=없음)
 static pthread_t g_audio_tid;
 
+// PATH 환경변수의 각 디렉토리를 순회하며 실행 가능한 바이너리를 찾는다.
+// 쉘(system/which) 호출 없이 순수 C로 access(X_OK) 검사만 수행한다.
+static int is_in_path(const char *bin) {
+    const char *path = getenv("PATH");
+    if (!path) return 0;
+
+    char dirs[4096];
+    snprintf(dirs, sizeof(dirs), "%s", path);
+
+    char *save = NULL;
+    for (char *dir = strtok_r(dirs, ":", &save); dir != NULL;
+         dir = strtok_r(NULL, ":", &save)) {
+        char full[MAX_PATH_LEN];
+        snprintf(full, sizeof(full), "%.200s/%.40s", dir, bin);
+        if (access(full, X_OK) == 0) return 1;
+    }
+    return 0;
+}
+
 // 현재 리눅스 시스템에 실행 가능한 오디오 커맨드가 있는지 우선순위 프로빙합니다.
 static const char* probe_audio_player(void) {
-    if (system("which mpg123 > /dev/null 2>&1") == 0) return "mpg123";
-    if (system("which ffplay > /dev/null 2>&1") == 0) return "ffplay";
-    if (system("which cvlc > /dev/null 2>&1") == 0)   return "cvlc";
+    if (is_in_path("mpg123")) return "mpg123";
+    if (is_in_path("ffplay")) return "ffplay";
+    if (is_in_path("cvlc"))   return "cvlc";
     return NULL; // 사용 가능한 플레이어 없음 (무음 모드 폴백)
 }
 
@@ -41,10 +60,8 @@ static void* audio_loop_thread_func(void* arg) {
 
     g_audio_active = 1;
 
-    // WSL2/WSLg 등 PulseAudio 브리지 환경에서 출력 버퍼 언더런(찍찍거리는 크래클링)을 완화.
-    // PULSE_LATENCY_MSEC로 재생 버퍼를 키우고(미설정 시에만), 자식들은 이 env를 상속받는다.
-    // WSLg PulseAudio 파이프는 스케줄링 지터로 출력 버퍼가 굶주려 클릭(언더런)이 난다.
-    // 재생 버퍼 지연을 넉넉히(300ms) 잡아 언더런 내성을 키운다. BGM이라 지연 체감은 무관.
+    // WSL2/WSLg PulseAudio 환경에서 버퍼 언더런(크래클링)을 완화하려고
+    // 재생 버퍼 지연을 키운다. BGM이라 지연 체감은 무관. (자식이 env 상속)
     int has_pulse = (getenv("PULSE_SERVER") != NULL);
     if (has_pulse) setenv("PULSE_LATENCY_MSEC", "500", 0);
 

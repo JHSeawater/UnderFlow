@@ -164,7 +164,7 @@ sudo apt install mpg123        # 권장 (가장 가볍고 안정적)
 
 ## 구현 특징
 
-- **데드락 원천 차단**: 다수 문서 자원 접근 시 ID 오름차순 정렬 강제 (`market_doc_lock_many` — `src/server/market.c`).
+- **데드락 회피 (리프 락 규율 + 고정 순서)**: 대부분의 임계영역은 뮤텍스(`g_market_mutex`·`g_npc_mutex`·`g_userdb_mutex`·`g_round_mutex`·`g_rumor_mutex` 등)를 단독·원자적으로 획득·해제하고, broadcast 등 외부 I/O는 항상 락 해제 후 수행한다. 유일한 중첩 구간인 주기 경찰 레이드의 접속자 스냅샷(`fire_periodic_police_raid`)은 `g_periodic_raid_mutex → clients_mutex` 한 방향 순서로만 획득하므로 역순 경로가 없어 순환 대기가 성립하지 않는다.
 - **EXDEV 회피**: 마스터·샌드박스를 `./data` 하위 단일 파일시스템에 묶어 `rename()` 항상 원자적.
 - **시그널 안전성 분기**: `SIGINT`는 패닉 플래그만 세팅(`volatile sig_atomic_t`), `SIGQUIT`은 `endwin` + `_exit` 안전 경로.
 - **무중단 운영**: `watchdog` 부모 프로세스 + `fork/execv/waitpid` 재시작 루프.

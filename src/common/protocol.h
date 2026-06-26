@@ -93,6 +93,7 @@ typedef enum {
     PKT_EVT_GAME_OVER,
     PKT_EVT_VICTORY,
     PKT_EVT_SCOREBOARD,         // 311 — GDD §F 라운드 종료 카운트다운
+    PKT_EVT_GOAL_UPDATE,        // 312 — 탈출 발생 시 갱신된 목표 상환액 전역 브로드캐스트
 } PacketType;
 
 // =============================================================
@@ -221,6 +222,9 @@ typedef struct {
             int32_t        remaining_count;                  // ≤ MAX_SCORE_REMAINING
             ScoreRemaining remaining[MAX_SCORE_REMAINING];   // 잔액 순위 (내림차순)
         } scoreboard;
+
+        // 탈출 발생 시 인상된 목표 상환액 (GDD §F 연쇄 채무 독촉)
+        struct { int32_t goal_money; } goal_update;
     } body;
 } Packet;
 

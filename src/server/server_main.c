@@ -594,11 +594,10 @@ static void handle_sell(int sock, const char *key, Packet *pkt) {
         return;
     }
 
-    // 락 순서 규약 — doc_id 오름차순 정렬로 Circular Wait 원천 차단
-    // (GDD §3.A / Task.md B-[핵심] 평가 어필 함수)
+    // 제출 문서 ID를 오름차순 정렬해 처리 순서를 결정적으로 고정한다.
     int32_t doc_ids[MAX_INVEN_SIZE];
     memcpy(doc_ids, pkt->body.sell.doc_ids, count * sizeof(int32_t));
-    market_doc_lock_many(doc_ids, count);
+    market_doc_sort_ids(doc_ids, count);
 
     // 1. NPC 존재 확인
     NPCSlot npc;
@@ -756,6 +755,13 @@ static void handle_payoff(int sock, const char *key) {
                  key, prev_goal, next_goal);
     }
     broadcast_packet(&evt);
+
+    // 인상된 목표 상환액을 전 클라이언트에 구조화 전송 → 남은 유저 UI 목표액 즉시 갱신
+    Packet goal_evt;
+    memset(&goal_evt, 0, sizeof(Packet));
+    goal_evt.type = PKT_EVT_GOAL_UPDATE;
+    goal_evt.body.goal_update.goal_money = next_goal;
+    broadcast_packet(&goal_evt);
 
     printf("[Server] User '%s' paid off! Escaped count: %d, New Goal: %d\n",
            key, escaped_now, next_goal);
@@ -970,6 +976,9 @@ static void handle_rumor(int sock, const char *key, Packet *pkt) {
 
     printf("[Server] %s paid %d for /rumor against %s (cooldown %ds).\n",
            key, RUMOR_FEE, target_key, RUMOR_COOLDOWN_SEC);
+
+    // 수수료 차감 결과(잔고)를 요청자에게 즉시 반영 (인벤 정보 재전송으로 my_money 갱신)
+    handle_inventory(sock, key);
 }
 
 // ============================================================
