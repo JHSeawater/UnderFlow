@@ -73,7 +73,7 @@ int sandbox_buy(const char *key, int32_t doc_id) {
     struct stat st;
     if (stat(from, &st) != 0) return -1;
 
-    // 같은 파일시스템(./data) 내부이므로 EXDEV 없이 원자적 rename
+    // master랑 user 폴더가 같은 ./data 안에 있어서 rename이 문제없이 동작
     if (rename(from, to) != 0) return -1;
 
     // 소유권 통제: 일반 유저가 직접 수정 못 하도록 read-only 처리

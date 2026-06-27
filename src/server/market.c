@@ -265,8 +265,7 @@ int npc_snapshot(NPCSlot *out_array, int max_size, int *out_count) {
     return 0;
 }
 
-// 묶음 매각 시 제출 문서 ID를 오름차순으로 정렬해 처리 순서를 결정적으로 고정한다.
-// (실제 동시성 안전은 개별 뮤텍스를 중첩 없이 원자적으로 사용하는 구조에서 보장된다.)
+// 묶음 매각 때 제출 문서 ID를 오름차순으로 정렬해서 처리 순서를 일정하게 맞춘다.
 static int cmp_int32_asc(const void *a, const void *b) {
     int32_t x = *(const int32_t *)a, y = *(const int32_t *)b;
     return (x > y) - (x < y);

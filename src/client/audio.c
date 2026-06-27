@@ -80,10 +80,8 @@ static void* audio_loop_thread_func(void* arg) {
         if (strcmp(player, "mpg123") == 0) {
             pargv[ai++] = "mpg123";
             if (has_pulse) {
-                pargv[ai++] = "-o"; pargv[ai++] = "pulse";  // 네이티브 pulse 모듈 (alsa→pulse 우회 회피)
-                // bgm/*.mp3는 전 곡 44100Hz로 통일되어 있으므로 리샘플 강제(-r) 불필요.
-                // mpg123가 네이티브 레이트로 재생 → 내부 리샘플러 품질저하·싱크 레이트 재협상
-                // 언더런(찍찍 크래클링)이 둘 다 발생하지 않는다.
+                pargv[ai++] = "-o"; pargv[ai++] = "pulse";  // alsa 거치지 말고 pulse로 바로
+                // bgm은 전부 44100Hz라서 -r로 리샘플 강제 안 해도 됨
             }
             pargv[ai++] = "--buffer"; pargv[ai++] = "8192";  // 디코드 선행 버퍼 확대(언더런 완충)
             pargv[ai++] = "-q";
@@ -144,7 +142,7 @@ int audio_init(const char *bgm_dir_path) {
             // 확장자가 .mp3 인지 검증
             char *ext = strrchr(entry->d_name, '.');
             if (ext && strcmp(ext, ".mp3") == 0) {
-                // 정밀도로 각 %s 상한을 둬 버퍼(256) 내 조립을 보장 (180+1+70 < 256)
+                // 경로가 버퍼(256)를 넘지 않게 %s마다 길이를 잘라서 합침
                 snprintf(g_playlist[g_bgm_count], MAX_PATH_LEN, "%.180s/%.70s",
                          bgm_dir_path, entry->d_name);
                 g_bgm_count++;

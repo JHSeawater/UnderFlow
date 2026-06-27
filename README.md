@@ -8,6 +8,22 @@
 
 ---
 
+## 목차
+
+1. [빌드](#빌드)
+2. [실행](#실행)
+3. [인게임 명령어](#인게임-명령어)
+4. [단축키](#단축키-ui-클라이언트)
+5. [게임 흐름](#게임-흐름)
+6. [디렉토리 구조](#디렉토리-구조)
+7. [시연 시나리오](#시연-시나리오)
+8. [사용 시스템 콜](#사용-시스템-콜)
+9. [핵심 기능](#핵심-기능)
+10. [구현하면서 신경 쓴 점](#구현하면서-신경-쓴-점)
+11. [주의](#주의)
+
+---
+
 ## 빌드
 
 ```bash
@@ -81,7 +97,7 @@ sudo apt install mpg123        # 권장 (가장 가볍고 안정적)
 
 | 키 | 동작 |
 |---|---|
-| `Ctrl+C` | 경찰 레이드 패닉 모드 진입 (암호 입력 미니게임) |
+| `Ctrl+C` | 클라이언트 종료 요청 (경찰 레이드 중에는 무시됨) |
 | **`Ctrl+\`** | 안전 탈출 (`endwin` 호출 후 즉시 종료) |
 | `Esc` | 입력 버퍼 초기화 |
 | `Backspace` | 입력 한 글자 삭제 |
@@ -123,7 +139,9 @@ sudo apt install mpg123        # 권장 (가장 가볍고 안정적)
 
 ---
 
-## 시연 시나리오 (예시 — 클라 3개)
+## 시연 시나리오
+
+아래는 클라이언트 3개로 진행하는 예시다.
 
 1. `./watchdog ./server` 띄우기.
 2. 외부 터미널 3개에서 각각 `./client_ui alice` / `./client_ui bob` / `./client_ui carol` 실행.
@@ -137,8 +155,6 @@ sudo apt install mpg123        # 권장 (가장 가볍고 안정적)
 
 ## 사용 시스템 콜
 
-필수 요건(서로 다른 시스템 콜 5개 이상)을 크게 상회하며, 모든 호출은 게임 로직·운영체제 제어에 실제로 쓰인다.
-
 | 분류 | 시스템 콜 | 용도 |
 |---|---|---|
 | **소켓/네트워크** | `socket` `bind` `listen` `accept` `connect` `send` `recv` `setsockopt` | TCP 서버-클라이언트 통신, `SO_REUSEADDR`, `MSG_NOSIGNAL` |
@@ -148,7 +164,9 @@ sudo apt install mpg123        # 권장 (가장 가볍고 안정적)
 | **파일 I/O·영속성** | `open` `close` `read` `write` `pread` `pwrite` `lseek` | `users.dat` 오프셋 기반 레코드 R/W, 문서 파일 |
 | **파일시스템·디렉토리** | `mkdir` `rename` `unlink` `opendir` `readdir` `closedir` `chmod` `stat` | 마스터/샌드박스 격리, 원자적 `rename`, 소각(unlink) |
 
-## 핵심 기능 (3개 이상 — 가산점 5개 이상)
+---
+
+## 핵심 기능
 
 1. **매물 선점 거래** — 선착순 독점 구매(`/buy`), 락 기반 동시성 방어.
 2. **NPC 의뢰 매각** — 태그 부분집합 매칭으로 묶음 판매(`/sell`).
@@ -162,18 +180,18 @@ sudo apt install mpg123        # 권장 (가장 가볍고 안정적)
 
 ---
 
-## 구현 특징
+## 구현하면서 신경 쓴 점
 
-- **데드락 회피 (리프 락 규율 + 고정 순서)**: 대부분의 임계영역은 뮤텍스(`g_market_mutex`·`g_npc_mutex`·`g_userdb_mutex`·`g_round_mutex`·`g_rumor_mutex` 등)를 단독·원자적으로 획득·해제하고, broadcast 등 외부 I/O는 항상 락 해제 후 수행한다. 유일한 중첩 구간인 주기 경찰 레이드의 접속자 스냅샷(`fire_periodic_police_raid`)은 `g_periodic_raid_mutex → clients_mutex` 한 방향 순서로만 획득하므로 역순 경로가 없어 순환 대기가 성립하지 않는다.
-- **EXDEV 회피**: 마스터·샌드박스를 `./data` 하위 단일 파일시스템에 묶어 `rename()` 항상 원자적.
-- **시그널 안전성 분기**: `SIGINT`는 패닉 플래그만 세팅(`volatile sig_atomic_t`), `SIGQUIT`은 `endwin` + `_exit` 안전 경로.
-- **무중단 운영**: `watchdog` 부모 프로세스 + `fork/execv/waitpid` 재시작 루프.
-- **레이스 방어**: `g_round_mutex`로 라운드 상태 직렬화, `g_rumor_mutex`로 사보타주 쿨다운 원자적 검사·예약, 매물 점유는 `market_take` 단일 임계영역.
-- **TOCTOU 방어**: `/buy` 시점에 `slot.is_frozen` + `market_take` 결과 두 단계 검증.
+- **데드락이 안 나도록 락을 단순하게 사용**: 락은 거의 다 한 번에 하나씩만 잡고 바로 풀었고, 채팅 broadcast처럼 시간이 걸리는 작업은 락을 푼 뒤에 했다. 두 개를 같이 잡는 곳은 주기 경찰 레이드(`fire_periodic_police_raid`)에서 접속자 목록을 복사할 때 한 군데뿐인데, 여기서는 항상 `g_periodic_raid_mutex` → `clients_mutex` 순서로만 잡아서 두 락이 서로 맞물려 멈추는 일이 없게 했다.
+- **파일 이동이 깨지지 않게**: master 폴더와 유저 샌드박스를 같은 `./data` 안에 둬서 `rename()`이 항상 안전하게 동작한다. (다른 파일시스템으로 옮기면 실패할 수 있어서 일부러 한 폴더 밑에 모았다.)
+- **시그널 처리 분리**: `SIGINT`(Ctrl+C)는 종료 플래그만 세우고(`volatile sig_atomic_t`), `SIGQUIT`(Ctrl+\)은 터미널을 복구하고 바로 빠져나가는 비상 탈출용으로 나눴다.
+- **서버 자동 재시작**: `watchdog`이 `fork`/`execv`/`waitpid`로 서버를 감시하다가 비정상 종료되면 다시 띄운다.
+- **동시 접근 충돌 방지**: 라운드 상태는 `g_round_mutex`, 사보타주 쿨다운은 `g_rumor_mutex`로 보호했고, 매물 선점은 `market_take` 한 곳에서만 처리해서 두 명이 같은 매물을 동시에 사는 걸 막았다.
+- **구매 검증 두 단계**: `/buy`할 때 동결 여부(`slot.is_frozen`)를 먼저 확인하고, 실제 점유는 `market_take`의 반환값으로 한 번 더 확인한다.
 
 ---
 
 ## 주의
 
-- 서버를 중간에 죽이면 마스터/샌드박스의 doc 파일과 `users.dat`이 그대로 남는다. 완전 초기화는 `rm -rf data/` 후 재실행.
+- 서버를 중간에 죽이면 마스터/샌드박스의 doc 파일과 `users.dat`이 그대로 남음. 완전 초기화는 `rm -rf data/` 후 재실행.
 - `client_ui`는 외부 터미널 권장. WSL 환경에서는 Windows Terminal 같은 GPU 가속 터미널 추천.

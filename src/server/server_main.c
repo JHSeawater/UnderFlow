@@ -391,8 +391,7 @@ void fire_round_end_countdown(const char *announce_text) {
     pthread_mutex_unlock(&clients_mutex);
 
     // 3. 잔액 조회 — 탈출자는 제외 (GDD §F: 스코어보드는 남은 플레이어 전용)
-    //    클라 disconnect 처리 전이라 active_keys에 탈출자가 잔존할 수 있는 race
-    //    window를 명시적으로 차단.
+    //    탈출 직후라 active_keys에 아직 남아 있을 수 있어서 한 번 더 걸러준다.
     ScoreRemaining rank[MAX_CLIENTS];
     int rank_cnt = 0;
     for (int i = 0; i < snap_cnt; i++) {
@@ -526,7 +525,7 @@ static void handle_buy(int sock, const char *key, Packet *pkt) {
 
     // 3. 인벤토리 용량 제한
     if (sandbox_count(key) >= MAX_INVEN_SIZE) {
-        send_error(sock, ERR_INVENTORY_FULL, "인벤토리가 가득 찼습니다 (최대 5칸).");
+        send_error(sock, ERR_INVENTORY_FULL, "인벤토리가 가득 찼습니다 (최대 7칸).");
         return;
     }
 
@@ -542,7 +541,7 @@ static void handle_buy(int sock, const char *key, Packet *pkt) {
         return;
     }
 
-    // 5. 매물 원자적 점유 (선착순 독점 + 동결 TOCTOU 동시 방어)
+    // 5. 매물 점유 — 락 안에서 한 번에 처리 (선착순 독점 + 동결 여부 같이 확인)
     int take_rc = market_take(doc_id, &slot);
     if (take_rc == -2) {
         send_error(sock, ERR_DOC_FROZEN, "동결된 매물입니다.");
@@ -594,7 +593,7 @@ static void handle_sell(int sock, const char *key, Packet *pkt) {
         return;
     }
 
-    // 제출 문서 ID를 오름차순 정렬해 처리 순서를 결정적으로 고정한다.
+    // 제출 문서 ID를 오름차순으로 정렬해서 처리 순서를 일정하게 맞춘다.
     int32_t doc_ids[MAX_INVEN_SIZE];
     memcpy(doc_ids, pkt->body.sell.doc_ids, count * sizeof(int32_t));
     market_doc_sort_ids(doc_ids, count);
