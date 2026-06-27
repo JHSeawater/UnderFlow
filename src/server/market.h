@@ -53,7 +53,7 @@ uint32_t market_active_tags(void);   // 현재 활성 매물에 존재하는 태
 int  market_snapshot(MarketSlot *out_array, int max_size, int *out_count);
 int  npc_snapshot(NPCSlot *out_array, int max_size, int *out_count);
 
-// 공중파 유출 (Role A의 동결 타이머에서 호출 예정)
+// 공중파 유출 — 태그 동결/해제
 void freeze_tags(uint32_t tags);
 void unfreeze_tags(uint32_t tags);
 int  is_tag_frozen(uint32_t tags);

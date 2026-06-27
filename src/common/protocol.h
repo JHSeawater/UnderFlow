@@ -8,7 +8,7 @@
 #define MAX_NAME_LEN         64
 #define MAX_INVEN_SIZE       7    // GDD 2-C: 인벤토리 최대 한도 (태그 확장에 맞춰 5 ➔ 7 상향)
 
-// GDD §F 스코어보드 정원 (Packet body 388B 내 수용을 위해 remaining=7)
+// GDD §F 스코어보드 정원 (탈출자 최대 3명 + 남은 유저 최대 7명까지 표시)
 #define MAX_SCORE_ESCAPED    3
 #define MAX_SCORE_REMAINING  7
 
@@ -142,7 +142,7 @@ typedef struct {
         struct { int32_t doc_id; } dispose;
         // PKT_REQ_INVEN: body 없음
         struct { char passcode[MAX_TEXT_LEN]; } minigame;
-        struct { char target_key[MAX_KEY_LEN]; } rumor; // 수정 반영
+        struct { char target_key[MAX_KEY_LEN]; } rumor;
 
         // ---------- 서버 → 클라 응답 ----------
         struct {
