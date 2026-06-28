@@ -17,10 +17,10 @@
 5. [게임 흐름](#게임-흐름)
 6. [디렉토리 구조](#디렉토리-구조)
 7. [시연 시나리오](#시연-시나리오)
-8. [사용 시스템 콜](#사용-시스템-콜)
+8. [스크린샷](#스크린샷)
 9. [핵심 기능](#핵심-기능)
-10. [구현하면서 신경 쓴 점](#구현하면서-신경-쓴-점)
-11. [주의](#주의)
+10. [주의](#주의)
+11. [팀원](#팀원)
 
 ---
 
@@ -153,16 +153,9 @@ sudo apt install mpg123        # 권장 (가장 가볍고 안정적)
 
 ---
 
-## 사용 시스템 콜
+## 스크린샷
 
-| 분류 | 시스템 콜 | 용도 |
-|---|---|---|
-| **소켓/네트워크** | `socket` `bind` `listen` `accept` `connect` `send` `recv` `setsockopt` | TCP 서버-클라이언트 통신, `SO_REUSEADDR`, `MSG_NOSIGNAL` |
-| **프로세스 제어** | `fork` `execv`/`execvp` `waitpid` `kill` | 워치독의 서버 재시작 루프, 좀비 차단 |
-| **스레드(동시성)** | `pthread_create` `pthread_detach` `pthread_mutex_lock`/`unlock` | 스레드-퍼-클라이언트, 매물 독점 락 |
-| **시그널** | `signal` | `SIGINT`/`SIGQUIT` 패닉·안전종료, `SIGPIPE` 무시 |
-| **파일 I/O·영속성** | `open` `close` `read` `write` `pread` `pwrite` `lseek` | `users.dat` 오프셋 기반 레코드 R/W, 문서 파일 |
-| **파일시스템·디렉토리** | `mkdir` `rename` `unlink` `opendir` `readdir` `closedir` `chmod` `stat` | 마스터/샌드박스 격리, 원자적 `rename`, 소각(unlink) |
+<img width="1913" height="993" alt="스크린샷 2026-06-27 184834" src="https://github.com/user-attachments/assets/6e18ccdd-0e33-42fc-9135-fedf7ae7a1d5" />
 
 ---
 
@@ -180,18 +173,15 @@ sudo apt install mpg123        # 권장 (가장 가볍고 안정적)
 
 ---
 
-## 구현하면서 신경 쓴 점
-
-- **데드락이 안 나도록 락을 단순하게 사용**: 락은 거의 다 한 번에 하나씩만 잡고 바로 풀었고, 채팅 broadcast처럼 시간이 걸리는 작업은 락을 푼 뒤에 했다. 두 개를 같이 잡는 곳은 주기 경찰 레이드(`fire_periodic_police_raid`)에서 접속자 목록을 복사할 때 한 군데뿐인데, 여기서는 항상 `g_periodic_raid_mutex` → `clients_mutex` 순서로만 잡아서 두 락이 서로 맞물려 멈추는 일이 없게 했다.
-- **파일 이동이 깨지지 않게**: master 폴더와 유저 샌드박스를 같은 `./data` 안에 둬서 `rename()`이 항상 안전하게 동작한다. (다른 파일시스템으로 옮기면 실패할 수 있어서 일부러 한 폴더 밑에 모았다.)
-- **시그널 처리 분리**: `SIGINT`(Ctrl+C)는 종료 플래그만 세우고(`volatile sig_atomic_t`), `SIGQUIT`(Ctrl+\)은 터미널을 복구하고 바로 빠져나가는 비상 탈출용으로 나눴다.
-- **서버 자동 재시작**: `watchdog`이 `fork`/`execv`/`waitpid`로 서버를 감시하다가 비정상 종료되면 다시 띄운다.
-- **동시 접근 충돌 방지**: 라운드 상태는 `g_round_mutex`, 사보타주 쿨다운은 `g_rumor_mutex`로 보호했고, 매물 선점은 `market_take` 한 곳에서만 처리해서 두 명이 같은 매물을 동시에 사는 걸 막았다.
-- **구매 검증 두 단계**: `/buy`할 때 동결 여부(`slot.is_frozen`)를 먼저 확인하고, 실제 점유는 `market_take`의 반환값으로 한 번 더 확인한다.
-
----
-
 ## 주의
 
 - 서버를 중간에 죽이면 마스터/샌드박스의 doc 파일과 `users.dat`이 그대로 남음. 완전 초기화는 `rm -rf data/` 후 재실행.
 - `client_ui`는 외부 터미널 권장. WSL 환경에서는 Windows Terminal 같은 GPU 가속 터미널 추천.
+
+---
+
+## 팀원
+
+- **정해수**: 네트워크 및 서버 아키텍처
+- **김성민**: 백엔드 코어 로직 및 파일 시스템
+- **우다령**: 클라이언트 UI 및 시그널 제어
