@@ -137,12 +137,22 @@ void delete_windows(UI *ui)
     memset(ui,0,sizeof(UI));
 }
 
+// 태그 표시 순서. 기업 5종(아사사카/바이오젠/넥서스/밀리테크/레이븐)을 앞으로 모으고
+// 나머지 분류 태그를 뒤에 둔다. 밀리테크/레이븐은 나중에 추가한 비트라 비트 순서로 돌면
+// 뒤로 밀려서, 여기서 순서를 직접 지정한다.
+static const uint32_t TAG_DISPLAY_ORDER[] = {
+    TAG_CORP_A, TAG_CORP_B, TAG_CORP_C, TAG_CORP_D, TAG_CORP_E,
+    TAG_CUSTOMER, TAG_FINANCE, TAG_MILITARY, TAG_GOVERNMENT,
+    TAG_MEDICAL, TAG_RESEARCH, TAG_PERSONAL,
+};
+#define TAG_DISPLAY_COUNT (int)(sizeof(TAG_DISPLAY_ORDER) / sizeof(TAG_DISPLAY_ORDER[0]))
+
 void render_tags(WINDOW *win, int y, int x, uint32_t mask)
 {
     int first = 1;
     wmove(win, y, x);
-    for (int i = 0; i < 12; i++) {
-        uint32_t bit = (1U << i);
+    for (int i = 0; i < TAG_DISPLAY_COUNT; i++) {
+        uint32_t bit = TAG_DISPLAY_ORDER[i];
         if (mask & bit) {
             if (!first) {
                 wprintw(win, "+");
@@ -159,8 +169,8 @@ void render_tags(WINDOW *win, int y, int x, uint32_t mask)
 static void tags_to_str(uint32_t mask, char *out, size_t out_sz) {
     out[0] = '\0';
     size_t len = 0;
-    for (int i = 0; i < 12; i++) {
-        uint32_t bit = (1U << i);
+    for (int i = 0; i < TAG_DISPLAY_COUNT; i++) {
+        uint32_t bit = TAG_DISPLAY_ORDER[i];
         if (mask & bit) {
             int w = snprintf(out + len, out_sz - len, "[%s]", get_tag_name(bit));
             if (w > 0) len += (size_t)w;
